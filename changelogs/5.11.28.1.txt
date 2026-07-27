@@ -1,3 +1,9 @@
 - fix: measure the started profile through the live instance
 - fix: cap MTU of nested WG/AWG hops, let their IPv6 socket bind
 - fix: sort endpoint-type chain hops into "endpoints" when testing
+- feat: import HAPP-compatible and JSON subscriptions with decoded titles
+- feat: support VLESS XHTTP in proxy and Windows TUN configurations
+- feat: enable, disable and prioritize routing profiles
+- feat: embed Inter V as the default interface font
+- fix: recreate core, TUN and QUIC sessions after Windows resume
+- fix: retry DNS through a fresh session after repeated remote QUIC stream closures

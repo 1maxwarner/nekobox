@@ -30,6 +30,13 @@ profile is generated.
 
 - Windows suspend/resume notifications trigger a delayed core/TUN/profile
   recreation after network adapters settle.
+- A remote QUIC `StreamError` with code `0` is normalized as a closed
+  connection and retried once after invalidating the DNS transport.
+- Three closed DNS streams within 30 seconds reset the DNS pool and network
+  outbounds, including the active Hysteria session, before retrying the
+  original query through a fresh session.
+- Windows resume and default-interface changes force QUIC-based outbounds to
+  discard their current sessions.
 - Thrift core calls use finite connect, receive, and send timeouts.
 - Core restart waits are bounded and the restart mutex is released on
   rate-limit exits.
@@ -58,5 +65,7 @@ profile is generated.
 
 ## Core
 
-The upstream source currently pins `github.com/qr243vbi/sing-box`
-`v1.13.14-mod3`, which contains the XHTTP implementation used by this build.
+The core is pinned to the private
+`fabbiodev/nekobox-sing-box-core@91655874690d`, based on
+`qr243vbi/sing-box v1.13.14-mod3`. It contains the XHTTP implementation and
+the DNS/QUIC recovery changes used by this build.
