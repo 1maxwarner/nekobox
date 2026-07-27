@@ -10,12 +10,138 @@
 #include <nekobox/dataStore/ProfileFilter.hpp>
 #include <nekobox/dataStore/Utils.hpp>
 #include <nekobox/dataStore/HTTPRequestHelper.hpp>
+#include <QRegularExpression>
 #include <QUrl>
 #include <functional>
 
 namespace Subscription {
 
 GroupUpdater *groupUpdater = new GroupUpdater;
+
+static QString decodeHeaderBytes(const QByteArray &bytes,
+                                 const QString &charset = "utf-8") {
+  if (charset.compare("iso-8859-1", Qt::CaseInsensitive) == 0 ||
+      charset.compare("latin1", Qt::CaseInsensitive) == 0) {
+    return QString::fromLatin1(bytes);
+  }
+  return QString::fromUtf8(bytes);
+}
+
+static QByteArray decodeQuotedPrintableWord(QByteArray value) {
+  value.replace('_', ' ');
+  QByteArray decoded;
+  decoded.reserve(value.size());
+  for (qsizetype i = 0; i < value.size(); ++i) {
+    if (value[i] == '=' && i + 2 < value.size()) {
+      bool ok = false;
+      const auto byte = value.mid(i + 1, 2).toUInt(&ok, 16);
+      if (ok) {
+        decoded.append(static_cast<char>(byte));
+        i += 2;
+        continue;
+      }
+    }
+    decoded.append(value[i]);
+  }
+  return decoded;
+}
+
+static QString decodeMimeWords(const QString &value) {
+  static const QRegularExpression mimeWord(
+      QStringLiteral(R"(=\?([^?]+)\?([bBqQ])\?([^?]*)\?=)"));
+  QString result;
+  qsizetype offset = 0;
+  auto matches = mimeWord.globalMatch(value);
+  while (matches.hasNext()) {
+    const auto match = matches.next();
+    result += value.mid(offset, match.capturedStart() - offset);
+    const auto encoding = match.captured(2);
+    const auto encoded = match.captured(3).toLatin1();
+    const auto bytes =
+        encoding.compare("b", Qt::CaseInsensitive) == 0
+            ? QByteArray::fromBase64(encoded)
+            : decodeQuotedPrintableWord(encoded);
+    result += decodeHeaderBytes(bytes, match.captured(1));
+    offset = match.capturedEnd();
+  }
+  result += value.mid(offset);
+  return result;
+}
+
+static QString normalizeSubscriptionTitle(QString title) {
+  title = decodeMimeWords(title.trimmed());
+
+  for (int i = 0;
+       i < 4 && title.startsWith("base64:", Qt::CaseInsensitive); ++i) {
+    auto encoded = title.mid(7).trimmed().toUtf8();
+    auto decoded = QByteArray::fromBase64(encoded);
+    if (decoded.isEmpty() && !encoded.isEmpty())
+      decoded = QByteArray::fromBase64(encoded, QByteArray::Base64UrlEncoding);
+    if (decoded.isEmpty())
+      break;
+    title = QString::fromUtf8(decoded).trimmed();
+  }
+
+  if (title.contains('%')) {
+    const auto decoded = QUrl::fromPercentEncoding(title.toUtf8());
+    if (!decoded.isEmpty())
+      title = decoded;
+  }
+
+  if (title.size() >= 2 &&
+      ((title.startsWith('"') && title.endsWith('"')) ||
+       (title.startsWith('\'') && title.endsWith('\'')))) {
+    title = title.mid(1, title.size() - 2);
+  }
+
+  title.replace(QRegularExpression(QStringLiteral(R"([\x00-\x1f\x7f]+)")),
+                QStringLiteral(" "));
+  title = title.simplified();
+  if (title.endsWith(".json", Qt::CaseInsensitive)) {
+    title.chop(5);
+  } else if (title.endsWith(".txt", Qt::CaseInsensitive)) {
+    title.chop(4);
+  }
+  return title.left(256).trimmed();
+}
+
+static QString titleFromContentDisposition(const QString &header) {
+  static const QRegularExpression encodedFilename(
+      QStringLiteral(R"(filename\*\s*=\s*([^']*)''([^;]+))"),
+      QRegularExpression::CaseInsensitiveOption);
+  auto match = encodedFilename.match(header);
+  if (match.hasMatch()) {
+    return normalizeSubscriptionTitle(
+        decodeHeaderBytes(QByteArray::fromPercentEncoding(
+                              match.captured(2).trimmed().toUtf8()),
+                          match.captured(1)));
+  }
+
+  static const QRegularExpression plainFilename(
+      QStringLiteral(R"regex(filename\s*=\s*(?:"([^"]+)"|([^;]+)))regex"),
+      QRegularExpression::CaseInsensitiveOption);
+  match = plainFilename.match(header);
+  if (match.hasMatch()) {
+    return normalizeSubscriptionTitle(
+        match.captured(1).isEmpty() ? match.captured(2) : match.captured(1));
+  }
+  return {};
+}
+
+static QString subscriptionTitleFromHeaders(
+    const QMap<EnumFieldName, QString> &headers) {
+  static const QStringList titleHeaders{
+      "Profile-Title", "Subscription-Title", "X-Subscription-Name",
+      "X-Profile-Title"};
+  for (const auto &header : titleHeaders) {
+    const auto title = normalizeSubscriptionTitle(
+        NetworkRequestHelper::GetHeader(headers, header));
+    if (!title.isEmpty())
+      return title;
+  }
+  return titleFromContentDisposition(
+      NetworkRequestHelper::GetHeader(headers, "Content-Disposition"));
+}
 
 void RawUpdater_FixEnt(const std::shared_ptr<Configs::ProxyEntity> &ent) {
   if (ent == nullptr)
@@ -1335,18 +1461,8 @@ void GroupUpdater::Update(
 
     if (group != nullptr) {
       if ( group->name.isEmpty() && _auto_name){
-        auto profileTitleRaw = NetworkRequestHelper::GetHeader(resp.header, "Profile-Title");
-        if (!profileTitleRaw.isEmpty()) {
-          QString profileTitle = profileTitleRaw.trimmed();
-          int counter = 0;
-          while (profileTitle.startsWith("base64:") && counter < 33) {
-            counter ++;
-            auto b64 = profileTitle.mid(7).toUtf8();
-            auto decoded = QByteArray::fromBase64(b64, QByteArray::OmitTrailingEquals);
-            if (!decoded.isEmpty()) {
-              profileTitle = QString::fromUtf8(decoded).trimmed();
-            }
-          }
+        const auto profileTitle = subscriptionTitleFromHeaders(resp.header);
+        if (!profileTitle.isEmpty()) {
           group->name = profileTitle;
           MW_show_log("<<<<<<<< " + QObject::tr("Subscription profile title: %1").arg(profileTitle));
         } else {
