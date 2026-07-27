@@ -262,9 +262,15 @@ activation limits.
 
 - `go test ./dns`
 - `go test -tags with_quic ./dns/transport/quic`
+- `go test ./transport/v2rayxhttp`, including closed-pipe error propagation
+  and forced XMUX recreation
 - clean local Windows Release build of GUI, private core, and updater
 - `go version -m` verification of private core revision
-  `2782f5f906fc8e1424d2a5a9e3e07c8e7ec0a2a2`
+  `e9b14f594644b7e55e0fbe38ef648bf01b1af325`
+- live VLESS Reality checks: gRPC returned HTTP 204; two current XHTTP
+  profiles returned HTTP 204, including 12 consecutive requests without loss
+- independent Xray-core control check confirmed that the supplied legacy XHTTP
+  profile is rejected by its server rather than by NekoBox
 - portable archive content and SHA-256 inspection
 - isolated eight-second GUI startup smoke run with a separate app-data folder
 - private-core Actions access via a dedicated read-only deploy key

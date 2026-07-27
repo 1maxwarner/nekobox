@@ -175,7 +175,7 @@ require (
 	lukechampine.com/blake3 v1.3.0 // indirect
 )
 
-replace github.com/sagernet/sing-box => github.com/fabbiodev/nekobox-sing-box-core v0.0.0-20260727155006-2782f5f906fc
+replace github.com/sagernet/sing-box => github.com/fabbiodev/nekobox-sing-box-core v0.0.0-20260727172205-e9b14f594644
 
 replace github.com/sagernet/sing-tun => github.com/qr243vbi/sing-tun v0.8.11-mod2
 
