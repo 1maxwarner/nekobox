@@ -151,6 +151,8 @@ namespace Configs {
 
         std::shared_ptr<RoutingChain> GetRouteChain(int id);
 
+        QList<std::shared_ptr<RoutingChain>> GetEnabledRouteChains() const;
+
         void UpdateRouteChains(const QList<std::shared_ptr<RoutingChain>>& newChain);
 
         QStringList GetExtraCorePaths() const;

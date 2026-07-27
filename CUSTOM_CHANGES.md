@@ -16,6 +16,11 @@ configured as the `upstream` Git remote.
   - SIP008 feeds with or without a `version` field.
 - XHTTP imports preserve the `extra` object and accept the
   `x_padding_bytes` share-link compatibility parameter.
+- Legacy `splithttp`/`split-http` VLESS links are normalized to XHTTP before
+  the outbound is used by proxy or Windows TUN/VPN mode.
+- Subscription names are decoded from `Profile-Title` and compatible title
+  headers, MIME encoded words, percent/RFC 5987 values, and
+  `Content-Disposition` filenames.
 
 HAPP-like headers are disabled by default. Enabling them uses a synthetic
 HWID, but a stable synthetic identifier can still link requests until a new
@@ -31,6 +36,16 @@ profile is generated.
 - Runtime logs are written to `settings/nekobox.log` and rotated at 4 MiB.
 - A leading Unicode country flag in a profile name is displayed as the
   corresponding English country name.
+
+## Routing profiles
+
+- Each routing profile has a persistent enabled state and numeric priority.
+- Lower priority numbers are shown first and are used first as fallback when
+  the currently selected profile is disabled.
+- Profiles can be enabled or disabled with one click from the routing profile
+  list or with the adjacent toggle button. At least one profile remains
+  enabled.
+- Enabled state and priority are preserved by route profile import/export.
 
 ## Core
 

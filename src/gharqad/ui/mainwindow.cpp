@@ -315,6 +315,8 @@ void MainWindow::import_route_profile_static( QWidget *widget, QString name, QSt
     QString err;
     QJsonArray array;
     bool skip_update = false;
+    bool enabled = true;
+    int priority = 100;
     int outboundId = proxy ? Configs::proxyID : Configs::directID; 
     auto json = QJsonDocument::fromJson(resp.toUtf8());
     if (json.isObject()){
@@ -323,10 +325,14 @@ void MainWindow::import_route_profile_static( QWidget *widget, QString name, QSt
       auto json_proxy = object["proxy"];
       auto json_array = object["rules"];
       auto json_url = object["url"];
-      auto skip_update = object["skip_update"];
-      if (skip_update.isBool()){
-        skip_update = skip_update.toBool();
+      const auto json_skip_update = object["skip_update"];
+      if (json_skip_update.isBool()){
+        skip_update = json_skip_update.toBool();
       }
+      if (object["enabled"].isBool())
+        enabled = object["enabled"].toBool();
+      if (object["priority"].isDouble())
+        priority = object["priority"].toInt();
       if (json_name.isString()){
         name = json_name.toString();
       }
@@ -373,6 +379,8 @@ void MainWindow::import_route_profile_static( QWidget *widget, QString name, QSt
     chain->Rules.clear();
     chain->Rules << parsed;
     chain->skip_update = skip_update;
+    chain->enabled = enabled;
+    chain->priority = priority;
     Configs::profileManager->AddRouteChain(chain);
 }
 
@@ -1676,13 +1684,16 @@ skip_updater_hide:
     mu_remoteRouteProfiles.unlock();
 
     ui->menuRouting_Menu->addSeparator();
-    for (const auto &route : Configs::profileManager->routes) {
+    for (const auto &route :
+         Configs::profileManager->GetEnabledRouteChains()) {
       auto *action = new QAction(ui->menuRouting_Menu);
-      action->setText(route.second->chain_name);
-      action->setData(route.second->id);
+      action->setText(QStringLiteral("%1  ·  %2")
+                          .arg(route->priority)
+                          .arg(route->chain_name));
+      action->setData(route->id);
       action->setCheckable(true);
       action->setChecked(Configs::dataStore->routing->current_route_id ==
-                         route.first);
+                         route->id);
       connect(action, &QAction::triggered, this, [=, this]() {
         CHECK_ACTION_ACCESS_W
         auto routeID = action->data().toInt();

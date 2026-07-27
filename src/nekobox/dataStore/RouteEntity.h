@@ -147,6 +147,9 @@ namespace Configs {
         QString chain_name = "";
         QString update_url = "";
         bool skip_update = false;
+        bool enabled = true;
+        // Lower values are evaluated/selected first.
+        int priority = 100;
         virtual ConfJsMap _map() override;
 
         QList<std::shared_ptr<RouteRule>> Rules;

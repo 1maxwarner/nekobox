@@ -58,6 +58,8 @@ private:
     RouteItem* routeChainWidget;
 
     void reloadProfileItems();
+    int selectedRouteIndex() const;
+    void updateRouteProfileControls();
 
     QList<std::shared_ptr<Configs::RoutingChain>> chainList;
 

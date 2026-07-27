@@ -907,6 +907,8 @@ namespace Configs {
         ADD_MAP("name", chain_name, string);
         ADD_MAP("update_url", update_url, string);
         ADD_MAP("skip_update", skip_update, boolean);
+        ADD_MAP("enabled", enabled, boolean);
+        ADD_MAP("priority", priority, integer);
         ADD_MAP("rules", castedRules, jsonStoreList);
         ADD_MAP("default_outbound", defaultOutboundID, integer);
     STOP_MAP
@@ -926,6 +928,8 @@ namespace Configs {
         chain_name = QString(other.chain_name);
         update_url = QString(other.update_url);
         skip_update = other.skip_update;
+        enabled = other.enabled;
+        priority = other.priority;
         for (const auto& item: other.Rules) {
             Rules.push_back(std::make_shared<RouteRule>(*item));
         }

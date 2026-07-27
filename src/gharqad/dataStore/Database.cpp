@@ -1,7 +1,5 @@
 
-
-
-
+#include <algorithm>
 #include <memory>
 #include <nekobox/dataStore/ConfigItem.hpp>
 #include <nekobox/dataStore/ProxyEntity.hpp>
@@ -1253,6 +1251,22 @@ bool ProfileManager::AddRouteChain(const std::shared_ptr<RoutingChain> &chain) {
 
 std::shared_ptr<RoutingChain> ProfileManager::GetRouteChain(int id) {
   return routes.count(id) > 0 ? routes[id] : nullptr;
+}
+
+QList<std::shared_ptr<RoutingChain>>
+ProfileManager::GetEnabledRouteChains() const {
+  QList<std::shared_ptr<RoutingChain>> result;
+  for (const auto &[id, chain] : routes) {
+    if (chain != nullptr && chain->enabled)
+      result << chain;
+  }
+  std::stable_sort(result.begin(), result.end(),
+                   [](const auto &left, const auto &right) {
+                     if (left->priority != right->priority)
+                       return left->priority < right->priority;
+                     return left->id < right->id;
+                   });
+  return result;
 }
 
 void ProfileManager::UpdateRouteChains(

@@ -1245,6 +1245,13 @@ void BuildConfigSingBox(const std::shared_ptr<BuildConfigStatus> &status) {
   if (!blockAll) {
     routeChain =
         profileManager->GetRouteChain(dataStore->routing->current_route_id);
+    if (routeChain != nullptr && !routeChain->enabled)
+      routeChain.reset();
+    if (routeChain == nullptr) {
+      const auto enabledRoutes = profileManager->GetEnabledRouteChains();
+      if (!enabledRoutes.isEmpty())
+        routeChain = enabledRoutes.first();
+    }
   } else {
     routeChain = RoutingChain::GetDefaultChain();
     routeChain->defaultOutboundID = blockID;

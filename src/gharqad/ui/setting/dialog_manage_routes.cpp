@@ -3,6 +3,7 @@
 #include <nekobox/configs/proxy/WireguardBean.h>
 
 #include <QClipboard>
+#include <algorithm>
 #include <memory>
 
 #include <nekobox/dataStore/Database.hpp>
@@ -33,26 +34,85 @@ void DialogManageRoutes::reloadProfileItems() {
         return;
     }
 
-    QSignalBlocker blocker = QSignalBlocker(ui->route_prof); // apparently the currentIndexChanged will make us crash if we clear the QComboBox
-    ui->route_prof->clear();
+    std::shared_ptr<Configs::RoutingChain> selectedChain;
+    const auto oldRow = ui->route_profiles->currentRow();
+    if (oldRow >= 0 && oldRow < chainList.size())
+        selectedChain = chainList[oldRow];
+    if (selectedChain == nullptr)
+        selectedChain = currentRoute;
 
+    std::stable_sort(chainList.begin(), chainList.end(),
+                     [](const auto &left, const auto &right) {
+                         if (left->priority != right->priority)
+                             return left->priority < right->priority;
+                         return left->id < right->id;
+                     });
+
+    QSignalBlocker comboBlocker(ui->route_prof);
+    QSignalBlocker listBlocker(ui->route_profiles);
+    ui->route_prof->clear();
     ui->route_profiles->clear();
-    bool selectedChainGone = true;
-    int i=0;
-    for (const auto &item: chainList) {
-        ui->route_prof->addItem(item->chain_name);
-        ui->route_profiles->addItem(item->chain_name);
-        if (item == currentRoute) {
-            ui->route_prof->setCurrentIndex(i);
-            selectedChainGone=false;
+
+    if (currentRoute == nullptr || !currentRoute->enabled) {
+        currentRoute.reset();
+        for (const auto &item : chainList) {
+            if (item->enabled) {
+                currentRoute = item;
+                break;
+            }
         }
-        i++;
     }
-    if (selectedChainGone) {
-        currentRoute=chainList[0];
-        ui->route_prof->setCurrentIndex(0);
+
+    int selectedListRow = -1;
+    int selectedComboRow = -1;
+    for (int i = 0; i < chainList.size(); ++i) {
+        const auto &item = chainList[i];
+        auto *listItem = new QListWidgetItem(
+            QStringLiteral("%1  ·  %2").arg(item->priority).arg(item->chain_name),
+            ui->route_profiles);
+        listItem->setFlags(listItem->flags() | Qt::ItemIsUserCheckable);
+        listItem->setCheckState(item->enabled ? Qt::Checked : Qt::Unchecked);
+        listItem->setToolTip(
+            item->enabled
+                ? tr("Enabled; priority %1").arg(item->priority)
+                : tr("Disabled; priority %1").arg(item->priority));
+
+        if (item == selectedChain)
+            selectedListRow = i;
+        if (item->enabled) {
+            ui->route_prof->addItem(item->chain_name, i);
+            if (item == currentRoute)
+                selectedComboRow = ui->route_prof->count() - 1;
+        }
     }
-    blocker.unblock();
+
+    if (selectedListRow < 0 && currentRoute != nullptr)
+        selectedListRow = chainList.indexOf(currentRoute);
+    if (selectedListRow < 0)
+        selectedListRow = 0;
+    ui->route_profiles->setCurrentRow(selectedListRow);
+    ui->route_prof->setCurrentIndex(selectedComboRow);
+    updateRouteProfileControls();
+}
+
+int DialogManageRoutes::selectedRouteIndex() const {
+    const auto row = ui->route_profiles->currentRow();
+    return row >= 0 && row < chainList.size() ? row : -1;
+}
+
+void DialogManageRoutes::updateRouteProfileControls() {
+    const auto idx = selectedRouteIndex();
+    const bool hasSelection = idx >= 0;
+    ui->route_priority->setEnabled(hasSelection);
+    ui->toggle_route->setEnabled(hasSelection);
+    if (!hasSelection)
+        return;
+
+    const auto &route = chainList[idx];
+    QSignalBlocker blocker(ui->route_priority);
+    ui->route_priority->setValue(route->priority);
+    ui->toggle_route->setText(route->enabled ? tr("Disable selected")
+                                              : tr("Enable selected"));
 }
 
 void DialogManageRoutes::set_dns_hijack_enability(const bool enable) const {
@@ -140,6 +200,62 @@ DialogManageRoutes::DialogManageRoutes(QWidget *parent, bool EditRouteProfiles) 
     });
 
     connect(ui->route_prof, SIGNAL(currentIndexChanged(int)), this, SLOT(updateCurrentRouteProfile(int)));
+    connect(ui->route_profiles, &QListWidget::currentRowChanged, this,
+            [this](int) { updateRouteProfileControls(); });
+    connect(ui->route_profiles, &QListWidget::itemChanged, this,
+            [this](QListWidgetItem *item) {
+                const auto idx = ui->route_profiles->row(item);
+                if (idx < 0 || idx >= chainList.size())
+                    return;
+                const bool enabled = item->checkState() == Qt::Checked;
+                if (!enabled && chainList[idx]->enabled) {
+                    const auto enabledCount =
+                        std::count_if(chainList.cbegin(), chainList.cend(),
+                                      [](const auto &route) {
+                                          return route->enabled;
+                                      });
+                    if (enabledCount <= 1) {
+                        QSignalBlocker blocker(ui->route_profiles);
+                        item->setCheckState(Qt::Checked);
+                        MessageBoxWarning(
+                            tr("Invalid operation"),
+                            tr("At least one routing profile must remain enabled"));
+                        return;
+                    }
+                }
+                chainList[idx]->enabled = enabled;
+                updateRouteProfileControls();
+                QTimer::singleShot(0, this,
+                                   [this] { reloadProfileItems(); });
+            });
+    connect(ui->toggle_route, &QPushButton::clicked, this, [this] {
+        const auto idx = selectedRouteIndex();
+        if (idx < 0)
+            return;
+        if (chainList[idx]->enabled) {
+            const auto enabledCount =
+                std::count_if(chainList.cbegin(), chainList.cend(),
+                              [](const auto &route) {
+                                  return route->enabled;
+                              });
+            if (enabledCount <= 1) {
+                MessageBoxWarning(
+                    tr("Invalid operation"),
+                    tr("At least one routing profile must remain enabled"));
+                return;
+            }
+        }
+        chainList[idx]->enabled = !chainList[idx]->enabled;
+        reloadProfileItems();
+    });
+    connect(ui->route_priority, &QSpinBox::valueChanged, this,
+            [this](int priority) {
+                const auto idx = selectedRouteIndex();
+                if (idx < 0 || chainList[idx]->priority == priority)
+                    return;
+                chainList[idx]->priority = priority;
+                reloadProfileItems();
+            });
 
     deleteShortcut = new QShortcut(QKeySequence(Qt::Key_Delete), this);
 
@@ -328,7 +444,11 @@ void DialogManageRoutes::BindWarpGenerator(
 };
 
 void DialogManageRoutes::updateCurrentRouteProfile(int idx) {
-    currentRoute = chainList[idx];
+    if (idx < 0)
+        return;
+    const auto chainIndex = ui->route_prof->itemData(idx).toInt();
+    if (chainIndex >= 0 && chainIndex < chainList.size())
+        currentRoute = chainList[chainIndex];
 }
 
 DialogManageRoutes::~DialogManageRoutes() {
@@ -338,6 +458,12 @@ DialogManageRoutes::~DialogManageRoutes() {
 void DialogManageRoutes::accept() {
     if (chainList.empty()) {
         MessageBoxInfo(tr("Invalid settings"), tr("Routing profile cannot be empty"));
+        return;
+    }
+    if (std::none_of(chainList.cbegin(), chainList.cend(),
+                     [](const auto &route) { return route->enabled; })) {
+        MessageBoxInfo(tr("Invalid settings"),
+                       tr("At least one routing profile must remain enabled"));
         return;
     }
     if (!validate_dns_rules(rule_editor->toPlainText())) {
@@ -409,7 +535,17 @@ void DialogManageRoutes::accept() {
 }
 
 void DialogManageRoutes::on_new_route_clicked() {
-    routeChainWidget = new RouteItem(this, Configs::ProfileManager::NewRouteChain());
+    auto route = Configs::ProfileManager::NewRouteChain();
+    if (!chainList.isEmpty()) {
+        route->priority =
+            (*std::max_element(chainList.cbegin(), chainList.cend(),
+                               [](const auto &left, const auto &right) {
+                                   return left->priority < right->priority;
+                               }))
+                ->priority +
+            10;
+    }
+    routeChainWidget = new RouteItem(this, route);
     routeChainWidget->setWindowModality(Qt::ApplicationModal);
     routeChainWidget->show();
     connect(routeChainWidget, &RouteItem::settingsChanged, this, [=,this](const std::shared_ptr<Configs::RoutingChain>& chain) {
@@ -430,6 +566,8 @@ void DialogManageRoutes::on_export_route_clicked()
         {"url", chain->update_url},
         {"proxy", chain->defaultOutboundID},
         {"skip_update", chain->skip_update},
+        {"enabled", chain->enabled},
+        {"priority", chain->priority},
         {"rules",  chain->get_route_rules(true, true, {})}
     };
     QStringList res;
@@ -451,6 +589,7 @@ void DialogManageRoutes::on_clone_route_clicked() {
 
     auto chainCopy = std::make_shared<Configs::RoutingChain>(*chainList[idx]);
     chainCopy->chain_name = chainCopy->chain_name + " clone";
+    chainCopy->priority++;
     chainCopy->id = -1;
     chainCopy->save_control_no_save(false);
     chainList.append(chainCopy);
