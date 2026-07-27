@@ -7,6 +7,7 @@
 #include <nekobox/configs/proxy/includes.h>
 
 #include <qjsonobject.h>
+#include <QJsonDocument>
 #include <QStandardPaths>
 #include <nekobox/dataStore/Utils.hpp>
 
@@ -168,6 +169,16 @@ namespace Configs {
                 stream->host = GetQueryValue(query, "host", "");
                 stream->xhttp_mode = GetQueryValue(query, "mode", "auto");
                 stream->xhttp_extra = GetQueryValue(query, "extra", "");
+                const auto padding =
+                    GetQueryValue(query, "x_padding_bytes", "");
+                if (!padding.isEmpty()) {
+                    auto extra =
+                        QJsonDocument::fromJson(stream->xhttp_extra.toUtf8())
+                            .object();
+                    extra["xPaddingBytes"] = padding;
+                    stream->xhttp_extra = QString::fromUtf8(
+                        QJsonDocument(extra).toJson(QJsonDocument::Compact));
+                }
             }
             return !(uuid.isEmpty() || entity->serverAddress.isEmpty());
         }

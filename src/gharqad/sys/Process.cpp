@@ -50,7 +50,9 @@ namespace Configs_sys {
 
     void CoreProcess::Kill() {
         process.kill();
-        process.waitForFinished();
+        if (!process.waitForFinished(3000)) {
+            MW_show_log("[Warn] Timed out waiting for the core to stop.");
+        }
     }
 
     CoreProcess::CoreProcess(const QString &core_path, const QStringList &args, std::string * domain, int * port, std::function<void()> func) {
@@ -127,6 +129,7 @@ namespace Configs_sys {
                     if (coreRestartTimer.restart() < 10 * 1000) {
                         coreRestartTimer = QElapsedTimer();
                         MW_show_log("[ERROR] " + QObject::tr("Core exits too frequently, stop automatic restart this profile."));
+                        this->restarting.unlock();
                         return;
                     }
                 } else {
@@ -148,6 +151,7 @@ namespace Configs_sys {
         }
         if (started) return;
         started = true;
+        failed_to_start = false;
         QStringList list = QProcessEnvironment::systemEnvironment().toStringList();
 
         QString rulesets = QDir("rule_sets").absolutePath();
@@ -193,8 +197,12 @@ namespace Configs_sys {
     void CoreProcess::Restart() {
         if (!restarting.tryLock()) return;
         process.kill();
-        process.waitForFinished(500);
+        if (!process.waitForFinished(3000)) {
+            MW_show_log(
+                "[Warn] Timed out waiting for the old core during restart.");
+        }
         started = false;
+        failed_to_start = false;
         Start();
         restarting.unlock();
     }

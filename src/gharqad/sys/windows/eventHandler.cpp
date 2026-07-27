@@ -23,6 +23,18 @@ bool PowerOffTaskkillFilter::nativeEventFilter(const QByteArray &eventType, void
                 cleanUpFunc(0);
                 return true;
             }
+        } else if (msg->message == WM_POWERBROADCAST) {
+            if (msg->wParam == PBT_APMSUSPEND) {
+                qDebug() << "PBT_APMSUSPEND received";
+                if (suspendFunc)
+                    suspendFunc();
+            } else if (msg->wParam == PBT_APMRESUMEAUTOMATIC ||
+                       msg->wParam == PBT_APMRESUMESUSPEND ||
+                       msg->wParam == PBT_APMRESUMECRITICAL) {
+                qDebug() << "power resume received";
+                if (resumeFunc)
+                    resumeFunc();
+            }
         }
     }
     return false;

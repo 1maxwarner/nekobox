@@ -16,7 +16,9 @@
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QKeySequence>
+#include <QRandomGenerator>
 #include <QStandardPaths>
+#include <QSysInfo>
 #include <memory>
 #include <nekobox/api/RPC.h>
 #include <QBuffer>
@@ -339,6 +341,30 @@ namespace Configs_ConfigItem {
 
 namespace Configs {
 
+namespace {
+QString SubscriptionValueOrDefault(const QString &value,
+                                   const QString &fallback,
+                                   bool isDefault) {
+  const auto trimmed = value.trimmed();
+  return isDefault || trimmed.isEmpty() ? fallback : trimmed;
+}
+
+QString DefaultSubscriptionHwid() {
+  QStringList parts{
+      qEnvironmentVariable("COMPUTERNAME").trimmed(),
+      QSysInfo::machineHostName().trimmed(),
+      QString::fromUtf8(QSysInfo::machineUniqueId()).trimmed(),
+  };
+  parts.removeAll("");
+  auto source = parts.join("|");
+  if (source.isEmpty())
+    source = "happ-hwid";
+  return QCryptographicHash::hash(source.toUtf8(), QCryptographicHash::Sha256)
+      .toHex()
+      .left(16);
+}
+} // namespace
+
 QByteArray hash(const QString & input)
 {
 QByteArray hash = QCryptographicHash::hash(
@@ -411,6 +437,14 @@ QByteArray hash = QCryptographicHash::hash(
     DECL_MAP(DataStore)
         ADD_MAP("sub_custom_hwid_params", sub_custom_hwid_params, string);
         ADD_MAP("user_agent2", user_agent, string);
+        ADD_MAP("sub_happ_headers", sub_happ_headers, boolean);
+        ADD_MAP("http_header_hwid", http_header_hwid, string);
+        ADD_MAP("http_header_device_locale", http_header_device_locale, string);
+        ADD_MAP("http_header_device_os", http_header_device_os, string);
+        ADD_MAP("http_header_ver_os", http_header_ver_os, string);
+        ADD_MAP("http_header_device_model", http_header_device_model, string);
+        ADD_MAP("http_header_accept_encoding", http_header_accept_encoding, string);
+        ADD_MAP("http_header_accept", http_header_accept, string);
         ADD_MAP("test_url", test_latency_url, string);
         ADD_MAP("disable_tray", disable_tray, boolean);
         ADD_MAP("current_group", current_group, integer);
@@ -422,7 +456,7 @@ QByteArray hash = QCryptographicHash::hash(
         ADD_MAP("mux_concurrency", mux_concurrency, integer);
         ADD_MAP("mux_padding", mux_padding, boolean);
         ADD_MAP("download_retries", download_retries, integer);
-        ADD_MAP("download_timeout", download_retries, integer);
+        ADD_MAP("download_timeout", download_timeout, integer);
         ADD_MAP("mux_default_on", mux_default_on, boolean);
         ADD_MAP("test_concurrent", test_concurrent, integer);
     //    ADD_MAP("ruleset_json_url", ruleset_json_url, string);
@@ -533,6 +567,70 @@ QByteArray hash = QCryptographicHash::hash(
             return "nekobox/" + version + " (Prefer ClashMeta Format)";
         }
         return user_agent;
+    }
+
+    QString DataStore::NormalizeHttpHwid(const QString &value) {
+        QString filtered;
+        filtered.reserve(16);
+        for (const auto ch : value.toLower()) {
+            if ((ch >= '0' && ch <= '9') || (ch >= 'a' && ch <= 'f')) {
+                filtered += ch;
+            }
+            if (filtered.size() >= 16)
+                break;
+        }
+        return filtered;
+    }
+
+    QString DataStore::GenerateHttpHwid() {
+        static constexpr char alphabet[] = "abcdef0123456789";
+        QString hwid;
+        hwid.reserve(16);
+        for (int i = 0; i < 16; ++i) {
+            hwid += QLatin1Char(
+                alphabet[QRandomGenerator::global()->bounded(16)]);
+        }
+        return hwid;
+    }
+
+    QString DataStore::GetHappUserAgent(bool isDefault) const {
+        return SubscriptionValueOrDefault(
+            user_agent, "Happ/3.16.2/Android/1749580", isDefault);
+    }
+
+    QString DataStore::GetHttpHeaderHwid(bool isDefault) const {
+        return SubscriptionValueOrDefault(
+            NormalizeHttpHwid(http_header_hwid), DefaultSubscriptionHwid(),
+            isDefault);
+    }
+
+    QString DataStore::GetHttpHeaderDeviceLocale(bool isDefault) const {
+        return SubscriptionValueOrDefault(
+            http_header_device_locale, "ru", isDefault);
+    }
+
+    QString DataStore::GetHttpHeaderDeviceOs(bool isDefault) const {
+        return SubscriptionValueOrDefault(
+            http_header_device_os, "Android", isDefault);
+    }
+
+    QString DataStore::GetHttpHeaderVerOs(bool isDefault) const {
+        return SubscriptionValueOrDefault(http_header_ver_os, "12", isDefault);
+    }
+
+    QString DataStore::GetHttpHeaderDeviceModel(bool isDefault) const {
+        return SubscriptionValueOrDefault(
+            http_header_device_model, "MNA-LX9", isDefault);
+    }
+
+    QString DataStore::GetHttpHeaderAcceptEncoding(bool isDefault) const {
+        return SubscriptionValueOrDefault(
+            http_header_accept_encoding, "gzip", isDefault);
+    }
+
+    QString DataStore::GetHttpHeaderAccept(bool isDefault) const {
+        return SubscriptionValueOrDefault(
+            http_header_accept, "*/*", isDefault);
     }
 
     // preset routing

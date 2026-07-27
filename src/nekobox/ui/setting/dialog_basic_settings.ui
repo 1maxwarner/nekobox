@@ -804,26 +804,6 @@
        <string>Subscription</string>
       </attribute>
       <layout class="QGridLayout" name="gridLayout_7">
-       <item row="10" column="0">
-        <widget class="QLabel" name="label_custom_hwid_params">
-         <property name="toolTip">
-          <string>&lt;html&gt;&lt;head/&gt;&lt;body&gt;&lt;p&gt;Format: hwid=value,os=value,osVersion=value,model=value&lt;/p&gt;&lt;p&gt;Leave empty to use default values. Only specify the parameters you want to override.&lt;/p&gt;&lt;/body&gt;&lt;/html&gt;</string>
-         </property>
-         <property name="text">
-          <string>Custom System Parameters (optional)</string>
-         </property>
-        </widget>
-       </item>
-       <item row="1" column="1">
-        <widget class="MyLineEdit" name="user_agent"/>
-       </item>
-       <item row="3" column="1">
-        <widget class="QCheckBox" name="sub_url_test">
-         <property name="text">
-          <string>URL Test after update</string>
-         </property>
-        </widget>
-       </item>
        <item row="0" column="1">
         <layout class="QHBoxLayout" name="horizontalLayout_5">
          <item>
@@ -854,13 +834,6 @@
          </item>
         </layout>
        </item>
-       <item row="4" column="1">
-        <widget class="QCheckBox" name="sub_rm_duplicates">
-         <property name="text">
-          <string>Remove Duplicates</string>
-         </property>
-        </widget>
-       </item>
        <item row="0" column="0">
         <widget class="QCheckBox" name="sub_auto_update_enable">
          <property name="sizePolicy">
@@ -874,13 +847,6 @@
          </property>
         </widget>
        </item>
-       <item row="10" column="1">
-        <widget class="QLineEdit" name="sub_custom_hwid_params">
-         <property name="placeholderText">
-          <string>hwid=custom_value,os=custom_os,osVersion=custom_version,model=custom_model</string>
-         </property>
-        </widget>
-       </item>
        <item row="1" column="0">
         <widget class="QLabel" name="label_4">
          <property name="text">
@@ -891,7 +857,118 @@
          </property>
         </widget>
        </item>
+       <item row="1" column="1">
+        <widget class="MyLineEdit" name="user_agent"/>
+       </item>
+       <item row="2" column="0">
+        <widget class="QCheckBox" name="sub_happ_headers">
+         <property name="toolTip">
+          <string>Sends a synthetic HAPP-compatible device fingerprint with subscription requests.</string>
+         </property>
+         <property name="text">
+          <string>Use HAPP-like request headers</string>
+         </property>
+        </widget>
+       </item>
+       <item row="2" column="1">
+        <widget class="QPushButton" name="sub_headers_generate">
+         <property name="text">
+          <string>Generate HAPP-like profile</string>
+         </property>
+        </widget>
+       </item>
        <item row="3" column="0">
+        <widget class="QLabel" name="label_happ_locale">
+         <property name="text">
+          <string>x-device-locale</string>
+         </property>
+        </widget>
+       </item>
+       <item row="3" column="1">
+        <widget class="MyLineEdit" name="http_header_device_locale"/>
+       </item>
+       <item row="4" column="0">
+        <widget class="QLabel" name="label_happ_hwid">
+         <property name="text">
+          <string>x-hwid</string>
+         </property>
+        </widget>
+       </item>
+       <item row="4" column="1">
+        <widget class="MyLineEdit" name="http_header_hwid">
+         <property name="maxLength">
+          <number>16</number>
+         </property>
+        </widget>
+       </item>
+       <item row="5" column="0">
+        <widget class="QLabel" name="label_happ_os">
+         <property name="text">
+          <string>x-device-os</string>
+         </property>
+        </widget>
+       </item>
+       <item row="5" column="1">
+        <widget class="MyLineEdit" name="http_header_device_os"/>
+       </item>
+       <item row="6" column="0">
+        <widget class="QLabel" name="label_happ_os_version">
+         <property name="text">
+          <string>x-ver-os</string>
+         </property>
+        </widget>
+       </item>
+       <item row="6" column="1">
+        <widget class="MyLineEdit" name="http_header_ver_os"/>
+       </item>
+       <item row="7" column="0">
+        <widget class="QLabel" name="label_happ_model">
+         <property name="text">
+          <string>x-device-model</string>
+         </property>
+        </widget>
+       </item>
+       <item row="7" column="1">
+        <widget class="MyLineEdit" name="http_header_device_model"/>
+       </item>
+       <item row="8" column="0">
+        <widget class="QLabel" name="label_happ_encoding">
+         <property name="text">
+          <string>Accept-Encoding</string>
+         </property>
+        </widget>
+       </item>
+       <item row="8" column="1">
+        <widget class="MyLineEdit" name="http_header_accept_encoding"/>
+       </item>
+       <item row="9" column="0">
+        <widget class="QLabel" name="label_happ_accept">
+         <property name="text">
+          <string>Accept</string>
+         </property>
+        </widget>
+       </item>
+       <item row="9" column="1">
+        <widget class="MyLineEdit" name="http_header_accept"/>
+       </item>
+       <item row="10" column="0">
+        <widget class="QLabel" name="label_custom_hwid_params">
+         <property name="toolTip">
+          <string>&lt;html&gt;&lt;head/&gt;&lt;body&gt;&lt;p&gt;Format: hwid=value,os=value,osVersion=value,model=value&lt;/p&gt;&lt;p&gt;Leave empty to use default values. Only specify the parameters you want to override.&lt;/p&gt;&lt;/body&gt;&lt;/html&gt;</string>
+         </property>
+         <property name="text">
+          <string>Real system parameters (optional)</string>
+         </property>
+        </widget>
+       </item>
+       <item row="10" column="1">
+        <widget class="QLineEdit" name="sub_custom_hwid_params">
+         <property name="placeholderText">
+          <string>hwid=custom_value,os=custom_os,osVersion=custom_version,model=custom_model</string>
+         </property>
+        </widget>
+       </item>
+       <item row="11" column="0">
         <widget class="QCheckBox" name="sub_send_hwid">
          <property name="toolTip">
           <string>&lt;html&gt;&lt;head/&gt;&lt;body&gt;&lt;p&gt;HWID=%1&lt;/p&gt;&lt;p&gt;OS=%2&lt;/p&gt;&lt;p&gt;OS Version=%3&lt;/p&gt;&lt;p&gt;Model=%4&lt;/p&gt;&lt;/body&gt;&lt;/html&gt;</string>
@@ -901,21 +978,35 @@
          </property>
         </widget>
        </item>
-       <item row="5" column="0">
-        <widget class="QCheckBox" name="sub_rm_invalid">
+       <item row="11" column="1">
+        <widget class="QCheckBox" name="sub_url_test">
          <property name="text">
-          <string>Remove Invalid</string>
+          <string>URL Test after update</string>
          </property>
         </widget>
        </item>
-       <item row="4" column="0">
+       <item row="12" column="0">
         <widget class="QCheckBox" name="sub_rm_unavailable">
          <property name="text">
           <string>Remove Unavailable</string>
          </property>
         </widget>
        </item>
-       <item row="5" column="1">
+       <item row="12" column="1">
+        <widget class="QCheckBox" name="sub_rm_duplicates">
+         <property name="text">
+          <string>Remove Duplicates</string>
+         </property>
+        </widget>
+       </item>
+       <item row="13" column="0">
+        <widget class="QCheckBox" name="sub_rm_invalid">
+         <property name="text">
+          <string>Remove Invalid</string>
+         </property>
+        </widget>
+       </item>
+       <item row="13" column="1">
         <widget class="QCheckBox" name="sub_clear">
          <property name="text">
           <string>Clear servers before update</string>

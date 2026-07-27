@@ -45,13 +45,22 @@ if (!Configs::dataStore->core_running) {                                        
 } else {    \
 }
 
+static constexpr int CoreRpcTimeoutMs = 15000;
+
 static std::shared_ptr<TTransport> getThriftTransport(){
     int port = Configs::dataStore->core_port;
+    std::shared_ptr<TSocket> socket;
     if (port > 0){
-        return std::shared_ptr<TTransport> (new TSocket(Configs::dataStore->core_domain, port));
+        socket = std::make_shared<TSocket>(
+            Configs::dataStore->core_domain, port);
     } else {
-        return std::shared_ptr<TTransport> (new TSocket(Configs::dataStore->core_domain));
+        socket =
+            std::make_shared<TSocket>(Configs::dataStore->core_domain);
     }
+    socket->setConnTimeout(CoreRpcTimeoutMs);
+    socket->setRecvTimeout(CoreRpcTimeoutMs);
+    socket->setSendTimeout(CoreRpcTimeoutMs);
+    return socket;
 }
 
 #define CHANNEL(X, VAL)                                                                 \
@@ -68,7 +77,7 @@ try{                                                                            
     client.X(resp, request);                                                            \
     transportAA->close();                                                                 \
     reply = std::make_optional(resp);                                                   \
-} catch (TException e){                                                                 \
+} catch (const TException &e){                                                          \
     status.ok = false;                                                                  \
     status.what = e.what();                                                             \
     qDebug() << QString::fromUtf8(status.what.c_str());                                    \

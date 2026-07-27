@@ -11,15 +11,16 @@
 #include <nekobox/dataStore/Utils.hpp>
 #include <nekobox/dataStore/HTTPRequestHelper.hpp>
 #include <QUrl>
+#include <functional>
 
 namespace Subscription {
 
 GroupUpdater *groupUpdater = new GroupUpdater;
 
 void RawUpdater_FixEnt(const std::shared_ptr<Configs::ProxyEntity> &ent) {
-  auto bean = ent->unlock(ent->bean());
   if (ent == nullptr)
     return;
+  auto bean = ent->unlock(ent->bean());
   auto stream = Configs::GetStreamSettings(bean.get());
   if (stream == nullptr)
     return;
@@ -462,6 +463,10 @@ static QJsonObject convertV2RayNToSingBox(const QJsonObject &v2rayn) {
     transport["path"] = s["path"].toString();
     transport["host"] = s["host"].toString();
     transport["mode"] = s["mode"].toString();
+    const auto extra = s["extra"].toObject();
+    for (auto it = extra.begin(); it != extra.end(); ++it) {
+      transport[it.key()] = it.value();
+    }
   }
   result["transport"] = transport;
   return result;
@@ -733,6 +738,62 @@ void RawUpdater::update(const QString &str3) {
     AddProxy(ent);
   };
 
+  std::function<bool(const QJsonValue &)> importJsonValue;
+  importJsonValue = [&](const QJsonValue &value) {
+    if (value.isString()) {
+      const auto link = value.toString().trimmed();
+      if (!link.isEmpty())
+        stack << link;
+      return !link.isEmpty();
+    }
+    if (!value.isObject())
+      return false;
+
+    const auto object = value.toObject();
+    for (const auto &key : {"proxy", "url", "uri", "link"}) {
+      const auto link = object[QLatin1String(key)].toString().trimmed();
+      if (!link.isEmpty()) {
+        stack << link;
+        return true;
+      }
+    }
+
+    if (object.contains("outbounds") || object.contains("endpoints")) {
+      const auto remarks = object["remarks"].toString();
+      if (object.contains("inbounds") || object.contains("routing") ||
+          object.contains("route") || object.contains("dns")) {
+        addFullJsonProxy(object, remarks);
+      } else {
+        updateSingBox(object, remarks);
+      }
+      return true;
+    }
+
+    if (object.contains("type")) {
+      updateSingBox(
+          QJsonObject{{"outbounds", QJsonArray{object}}},
+          object["remarks"].toString());
+      return true;
+    }
+    if (object.contains("protocol")) {
+      const auto converted = convertV2RayNToSingBox(object);
+      if (!converted.isEmpty()) {
+        updateSingBox(
+            QJsonObject{{"outbounds", QJsonArray{converted}}},
+            object["remarks"].toString());
+        return true;
+      }
+    }
+
+    bool imported = false;
+    for (const auto &key : {"nodes", "configs", "items"}) {
+      const auto array = object[QLatin1String(key)].toArray();
+      for (const auto &item : array)
+        imported = importJsonValue(item) || imported;
+    }
+    return imported;
+  };
+
 ret_loop:
   if (stack.size() != 0) {
     str = stack.takeFirst();
@@ -807,24 +868,24 @@ ret_loop:
   json_ok = error.error == error.NoError;
   if (json_ok) {
     if (jsonDocument.isArray()) {
+      QJsonArray sip008Servers;
       for (auto i : jsonDocument.array()) {
         if (i.isObject()) {
-          auto json = i.toObject();
-          if (json.contains("proxy")) {
-            stack << json["proxy"].toString();
-          } else if (json.contains("outbounds") || json.contains("endpoints")) {
-            auto remarks = json["remarks"].toString();
-            if (json.contains("inbounds") || json.contains("routing") ||
-                json.contains("route") || json.contains("dns")) {
-              addFullJsonProxy(json, remarks);
-            } else {
-              updateSingBox(json, remarks);
-            }
+          const auto object = i.toObject();
+          if (object.contains("method") && object.contains("server") &&
+              (object.contains("server_port") || object.contains("port"))) {
+            auto server = object;
+            if (!server.contains("server_port"))
+              server["server_port"] = server["port"];
+            sip008Servers.append(server);
+            continue;
           }
-        } else if (i.isString()) {
-          stack << i.toString();
         }
+        importJsonValue(i);
       }
+      if (!sip008Servers.isEmpty())
+        updateSIP008(QJsonObject{{"version", 1},
+                                {"servers", sip008Servers}});
       goto ret_loop;
     } else if (!jsonDocument.isObject()) {
       goto ret_loop;
@@ -850,9 +911,16 @@ ret_loop:
       goto ret_loop;
     }
 
-    // SIP008
-    if (json.contains("version") && json.contains("servers")) {
+    // SIP008, including feeds that omit the optional version marker.
+    if (json.contains("servers") && json["servers"].isArray()) {
       updateSIP008(json);
+      goto ret_loop;
+    }
+    if (json.contains("proxies") && json["proxies"].isArray() &&
+        updateClash(str)) {
+      goto ret_loop;
+    }
+    if (importJsonValue(json)) {
       goto ret_loop;
     }
     goto parse_json;
@@ -980,6 +1048,8 @@ void RawUpdater::updateSIP008(const QJsonObject &json) {
       MW_show_log("invalid server object");
       continue;
     }
+    if (!out.contains("server_port") && out.contains("port"))
+      out["server_port"] = out["port"];
 
     auto ent = Configs::ProfileManager::NewProxyEntity("shadowsocks");
     auto ok = ent->unlock(ent->ShadowSocksBean())->TryParseFromSIP008(out);

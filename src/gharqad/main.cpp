@@ -510,7 +510,16 @@ int main(int argc, char **argv) {
 #endif
 
 #ifdef Q_OS_WIN
-  auto eventFilter = new PowerOffTaskkillFilter(signal_handler);
+  auto eventFilter = new PowerOffTaskkillFilter(
+      signal_handler,
+      [] {
+        if (auto *window = GetMainWindow())
+          window->handleSystemSuspend();
+      },
+      [] {
+        if (auto *window = GetMainWindow())
+          window->handleSystemResume();
+      });
   a.installNativeEventFilter(eventFilter);
 #endif
 

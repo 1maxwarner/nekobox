@@ -14,6 +14,8 @@
 #include <QFileDialog>
 #include <QInputDialog>
 #include <QMessageBox>
+#include <QRandomGenerator>
+#include <QSignalBlocker>
 #include <QTimer>
 #include <qboxlayout.h>
 #include <qfontdatabase.h>
@@ -33,6 +35,93 @@
 #include <QDir>
 
 #define settings Configs::windowSettings
+
+namespace {
+struct HappDeviceProfile {
+    const char *model;
+    const char *android;
+};
+
+QString RandomFrom(const QStringList &list) {
+    return list.at(QRandomGenerator::global()->bounded(list.size()));
+}
+
+const QStringList &HappUserAgents() {
+    static const QStringList values{
+        "Happ/3.16.2/Android/1749580",
+        "Happ/3.16.1/Android/1749200",
+        "Happ/3.16.0/Android/1748800",
+        "Happ/3.15.8/Android/1747200",
+        "Happ/3.15.7/Android/1746900",
+        "Happ/3.15.6/Android/1746500",
+    };
+    return values;
+}
+
+const QStringList &HappDeviceLocales() {
+    static const QStringList values{
+        "ru", "ru-RU", "en", "en-US", "en-GB",
+        "de-DE", "fr-FR", "tr-TR", "uk-UA", "es-ES",
+    };
+    return values;
+}
+
+const QStringList &HappDeviceOsList() {
+    static const QStringList values{
+        "Android", "android", "Android OS", "AndroidOS", "Google Android",
+        "AOSP", "HarmonyOS", "MIUI Android", "HyperOS Android", "OneUI Android",
+    };
+    return values;
+}
+
+const QStringList &HappAcceptEncodingList() {
+    static const QStringList values{
+        "gzip", "gzip, deflate", "gzip, br", "gzip, deflate, br",
+        "br, gzip", "deflate, gzip", "identity", "gzip;q=1.0",
+        "gzip, deflate, zstd", "gzip, zstd",
+    };
+    return values;
+}
+
+const QStringList &HappAcceptList() {
+    static const QStringList values{
+        "*/*", "application/json", "text/plain", "text/plain, */*",
+        "application/json, text/plain, */*", "*/*;q=0.8",
+        "application/octet-stream", "text/html,application/json,*/*",
+        "application/x-www-form-urlencoded,*/*",
+        "application/json;charset=utf-8",
+    };
+    return values;
+}
+
+const QList<HappDeviceProfile> &HappDeviceProfiles() {
+    static const QList<HappDeviceProfile> values{
+        {"MNA-LX9", "12"}, {"DCO-LX9", "12"}, {"JAD-LX9", "12"},
+        {"SM-S911B", "13"}, {"SM-S918B", "13"}, {"SM-S921B", "14"},
+        {"SM-S928B", "14"}, {"SM-A546B", "13"}, {"SM-A556B", "14"},
+        {"Pixel 6", "12"}, {"Pixel 7", "13"}, {"Pixel 8", "14"},
+        {"Pixel 9", "15"}, {"2211133G", "13"}, {"23127PN0CG", "14"},
+        {"CPH2449", "13"}, {"CPH2581", "14"}, {"XQ-DQ54", "13"},
+    };
+    return values;
+}
+
+void GenerateRandomSubscriptionHeaders(Ui::DialogBasicSettings *ui) {
+    const auto &profiles = HappDeviceProfiles();
+    const auto &profile =
+        profiles.at(QRandomGenerator::global()->bounded(profiles.size()));
+    ui->user_agent->setText(RandomFrom(HappUserAgents()));
+    ui->http_header_device_locale->setText(RandomFrom(HappDeviceLocales()));
+    ui->http_header_hwid->setText(Configs::DataStore::GenerateHttpHwid());
+    ui->http_header_device_os->setText(RandomFrom(HappDeviceOsList()));
+    ui->http_header_ver_os->setText(profile.android);
+    ui->http_header_device_model->setText(profile.model);
+    ui->http_header_accept_encoding->setText(
+        RandomFrom(HappAcceptEncodingList()));
+    ui->http_header_accept->setText(RandomFrom(HappAcceptList()));
+    ui->sub_happ_headers->setChecked(true);
+}
+} // namespace
 
 int LanguageModel::rowCount(const QModelIndex &parent ) const {
     return languageList.size(); // The number of items in the list
@@ -348,6 +437,65 @@ DialogBasicSettings::DialogBasicSettings(MainWindow *parent)
     });
     D_LOAD_STRING(user_agent)
     ui->user_agent->setPlaceholderText(Configs::dataStore->GetUserAgent(true));
+    D_LOAD_BOOL(sub_happ_headers)
+    D_LOAD_STRING(http_header_device_locale)
+    ui->http_header_device_locale->setPlaceholderText(
+        Configs::dataStore->GetHttpHeaderDeviceLocale(true));
+    ui->http_header_hwid->setText(Configs::DataStore::NormalizeHttpHwid(
+        Configs::dataStore->http_header_hwid));
+    ui->http_header_hwid->setPlaceholderText(
+        Configs::dataStore->GetHttpHeaderHwid(true));
+    D_LOAD_STRING(http_header_device_os)
+    ui->http_header_device_os->setPlaceholderText(
+        Configs::dataStore->GetHttpHeaderDeviceOs(true));
+    D_LOAD_STRING(http_header_ver_os)
+    ui->http_header_ver_os->setPlaceholderText(
+        Configs::dataStore->GetHttpHeaderVerOs(true));
+    D_LOAD_STRING(http_header_device_model)
+    ui->http_header_device_model->setPlaceholderText(
+        Configs::dataStore->GetHttpHeaderDeviceModel(true));
+    D_LOAD_STRING(http_header_accept_encoding)
+    ui->http_header_accept_encoding->setPlaceholderText(
+        Configs::dataStore->GetHttpHeaderAcceptEncoding(true));
+    D_LOAD_STRING(http_header_accept)
+    ui->http_header_accept->setPlaceholderText(
+        Configs::dataStore->GetHttpHeaderAccept(true));
+    const auto updateHappFields = [this](bool enabled) {
+        const QList<QWidget *> widgets{
+            ui->label_happ_locale,
+            ui->http_header_device_locale,
+            ui->label_happ_hwid,
+            ui->http_header_hwid,
+            ui->label_happ_os,
+            ui->http_header_device_os,
+            ui->label_happ_os_version,
+            ui->http_header_ver_os,
+            ui->label_happ_model,
+            ui->http_header_device_model,
+            ui->label_happ_encoding,
+            ui->http_header_accept_encoding,
+            ui->label_happ_accept,
+            ui->http_header_accept,
+        };
+        for (auto *widget : widgets)
+            widget->setEnabled(enabled);
+    };
+    updateHappFields(ui->sub_happ_headers->isChecked());
+    connect(ui->sub_happ_headers, STATE_CHANGED, this,
+            [this, updateHappFields] {
+                updateHappFields(ui->sub_happ_headers->isChecked());
+            });
+    connect(ui->sub_headers_generate, &QPushButton::clicked, this,
+            [this] { GenerateRandomSubscriptionHeaders(ui); });
+    connect(ui->http_header_hwid, &QLineEdit::textChanged, this,
+            [this](const QString &text) {
+                const auto normalized =
+                    Configs::DataStore::NormalizeHttpHwid(text);
+                if (normalized == text)
+                    return;
+                QSignalBlocker blocker(ui->http_header_hwid);
+                ui->http_header_hwid->setText(normalized);
+            });
     D_LOAD_BOOL(network_use_proxy);
     D_LOAD_BOOL(sub_clear)
     D_LOAD_BOOL(net_insecure)
@@ -536,6 +684,38 @@ void DialogBasicSettings::accept() {
     }
 
     D_SAVE_STRING(user_agent)
+    {
+        bool newHapp = ui->sub_happ_headers->isChecked();
+        const bool wasHapp = Configs::dataStore->sub_happ_headers;
+        if (newHapp && !wasHapp) {
+            const auto btn = QMessageBox::warning(
+                this,
+                tr("Privacy Warning"),
+                tr("HAPP-like mode sends a synthetic device fingerprint with "
+                   "every subscription request (HWID, locale, Android version, "
+                   "device model and HAPP User-Agent).\n\n"
+                   "The values do not expose the real hardware serial, but a "
+                   "stable synthetic HWID can still let a subscription server "
+                   "link requests until you generate a new profile.\n\n"
+                   "Enable HAPP-like request headers?"),
+                QMessageBox::Yes | QMessageBox::No,
+                QMessageBox::No);
+            if (btn != QMessageBox::Yes) {
+                ui->sub_happ_headers->setChecked(false);
+                newHapp = false;
+            }
+        }
+        Configs::dataStore->sub_happ_headers = newHapp;
+    }
+    Configs::dataStore->http_header_hwid =
+        Configs::DataStore::NormalizeHttpHwid(
+            ui->http_header_hwid->text());
+    D_SAVE_STRING(http_header_device_locale)
+    D_SAVE_STRING(http_header_device_os)
+    D_SAVE_STRING(http_header_ver_os)
+    D_SAVE_STRING(http_header_device_model)
+    D_SAVE_STRING(http_header_accept_encoding)
+    D_SAVE_STRING(http_header_accept)
     D_SAVE_BOOL(network_use_proxy)
 
     S_SAVE_BOOL(test_after_start)

@@ -79,6 +79,7 @@ class JsUpdaterWindow;
 #include <nekobox/ui/mainwindow_table.h>
 
 class MainWindow;
+class QTimer;
 
 class SpinnerDialog : public QDialog {
     Q_OBJECT
@@ -205,6 +206,10 @@ public:
     bool get_elevated_permissions(int reason = 3, void * pointer = nullptr);
 
     void show_log_impl(const QString &log);
+
+    void handleSystemSuspend();
+
+    void handleSystemResume();
 
     void menu_server_about_to_show(QMenu * menu);
 
@@ -351,7 +356,9 @@ private:
     bool force_hide_text_under_buttons = false;
     bool force_hide_tray = false;
     //
-    Configs_sys::CoreProcess *core_process;
+    Configs_sys::CoreProcess *core_process = nullptr;
+    QTimer *resumeRecoveryTimer = nullptr;
+    int suspendedProfileId = -1;
     qint64 vpn_pid = 0;
     //
     QCheckBox *logAutoScrollCheckBox = nullptr;

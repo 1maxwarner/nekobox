@@ -25,7 +25,10 @@ void Configs_network::BuildSession(const QString &url, bool sendHwid, cpr::Sessi
     // USER AGENT
     // ------------------------
     session.SetHeader({
-        {"User-Agent", s->GetUserAgent().toStdString()}
+        {"User-Agent", (s->sub_happ_headers
+                            ? s->GetHappUserAgent()
+                            : s->GetUserAgent())
+                           .toStdString()}
     });
 
     // ------------------------
@@ -74,6 +77,21 @@ void Configs_network::BuildSession(const QString &url, bool sendHwid, cpr::Sessi
     cpr::Header headers;
     if (sendHwid){        
         for (auto [key, value]: asKeyValueRange(GetHWID(s->sub_custom_hwid_params))){
+            headers[key.toStdString()] = value.toStdString();
+        }
+    }
+
+    if (s->sub_happ_headers) {
+        const QMap<QString, QString> happHeaders{
+            {"x-device-locale", s->GetHttpHeaderDeviceLocale()},
+            {"x-hwid", s->GetHttpHeaderHwid()},
+            {"x-device-os", s->GetHttpHeaderDeviceOs()},
+            {"x-ver-os", s->GetHttpHeaderVerOs()},
+            {"x-device-model", s->GetHttpHeaderDeviceModel()},
+            {"Accept-Encoding", s->GetHttpHeaderAcceptEncoding()},
+            {"Accept", s->GetHttpHeaderAccept()},
+        };
+        for (auto [key, value] : asKeyValueRange(happHeaders)) {
             headers[key.toStdString()] = value.toStdString();
         }
     }

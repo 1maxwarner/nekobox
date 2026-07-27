@@ -78,9 +78,11 @@
 #endif
 
 #include <QClipboard>
+#include <QDateTime>
 #include <QDesktopServices>
 #include <QUrlQuery>
 #include <QDir>
+#include <QFile>
 #include <QFileInfo>
 #include <QInputDialog>
 #include <QLabel>
@@ -931,6 +933,8 @@ MainWindow::MainWindow(QWidget *parent)
   MW_show_log = [=, this](const QString &log) {
     runOnUiThread([=, this] { show_log_impl(log); });
   };
+  MW_show_log(QStringLiteral("[Startup] NekoBox %1 started")
+                  .arg(QStringLiteral(NKR_VERSION)));
 
   // Listen port if random
   if (Configs::dataStore->random_inbound_port) {
@@ -4264,11 +4268,36 @@ inline void FastAppendTextDocument(const QString &message, QTextDocument *doc) {
   cursor.endEditBlock();
 }
 
-void MainWindow::show_log_impl(const QString &log) {
-  if (!Configs::windowSettings->logs_enabled) {
+namespace {
+void AppendPersistentLog(const QString &message) {
+  if (message.isEmpty())
     return;
+
+  constexpr qint64 MaxLogSize = 4 * 1024 * 1024;
+  const auto path = QDir::current().filePath("nekobox.log");
+  const QFileInfo info(path);
+  if (info.exists() && info.size() >= MaxLogSize) {
+    QFile::remove(path + ".2");
+    if (QFile::exists(path + ".1"))
+      QFile::rename(path + ".1", path + ".2");
+    QFile::rename(path, path + ".1");
   }
 
+  QFile file(path);
+  if (!file.open(QIODevice::WriteOnly | QIODevice::Append |
+                 QIODevice::Text)) {
+    return;
+  }
+  const auto record =
+      QStringLiteral("[%1] %2\n")
+          .arg(QDateTime::currentDateTime().toString(Qt::ISODateWithMs),
+               message)
+          .toUtf8();
+  file.write(record);
+}
+} // namespace
+
+void MainWindow::show_log_impl(const QString &log) {
   logLock.lock();
 
   QString trimmed;
@@ -4276,6 +4305,11 @@ void MainWindow::show_log_impl(const QString &log) {
     trimmed = ("Ignored massive log of size: " + QString::number(log.size()));
   } else {
     trimmed = sanitizeLog(log).trimmed();
+  }
+  AppendPersistentLog(trimmed);
+  if (!Configs::windowSettings->logs_enabled) {
+    logLock.unlock();
+    return;
   }
   int blockCount = qvLogDocument->blockCount();
   // Check the number of blocks
@@ -4320,6 +4354,54 @@ void MainWindow::show_log_impl(const QString &log) {
   }
 
   logLock.unlock();
+}
+
+void MainWindow::handleSystemSuspend() {
+  suspendedProfileId =
+      running != nullptr ? running->id : Configs::dataStore->started_id;
+  if (resumeRecoveryTimer != nullptr)
+    resumeRecoveryTimer->stop();
+  if (suspendedProfileId >= 0)
+    MW_show_log("[Power] System is suspending; active profile state saved.");
+}
+
+void MainWindow::handleSystemResume() {
+  if (Configs::dataStore->prepare_exit)
+    return;
+  if (suspendedProfileId < 0)
+    suspendedProfileId = Configs::dataStore->started_id;
+  if (suspendedProfileId < 0)
+    return;
+
+  if (resumeRecoveryTimer == nullptr) {
+    resumeRecoveryTimer = new QTimer(this);
+    resumeRecoveryTimer->setSingleShot(true);
+    connect(resumeRecoveryTimer, &QTimer::timeout, this, [this] {
+      const int profileId = suspendedProfileId;
+      suspendedProfileId = -1;
+      if (profileId < 0 || Configs::dataStore->prepare_exit ||
+          core_process == nullptr) {
+        return;
+      }
+
+      MW_show_log(
+          "[Power] Resume detected; recreating core, TUN and active profile.");
+      if (running != nullptr)
+        profile_stop(true, true, false);
+
+      runOnThread(
+          [this, profileId] {
+            core_process->start_profile_when_core_is_up = profileId;
+            core_process->Restart();
+          },
+          DS_cores);
+    });
+  }
+
+  // Network adapters and Windows routes are still settling immediately after
+  // resume. Repeated resume notifications restart this timer instead of
+  // launching duplicate recovery jobs.
+  resumeRecoveryTimer->start(8000);
 }
 
 void MainWindow::on_masterLogBrowser_customContextMenuRequested(

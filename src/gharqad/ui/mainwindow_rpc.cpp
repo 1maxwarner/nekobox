@@ -873,7 +873,7 @@ void MainWindow::profile_stop(bool crash, bool block, bool manual) {
 
         if (block) blocker.unlock();
 
-        runOnUiThread([=, this, &blocker] {
+        runOnUiThread([=, this] {
             refresh_status();
             refresh_proxy_list_impl_refresh_data(id, true);
 

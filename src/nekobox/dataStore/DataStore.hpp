@@ -205,6 +205,14 @@ namespace Configs {
 
         // Subscription
         QString user_agent = ""; // set at main.cpp
+        bool sub_happ_headers = false;
+        QString http_header_hwid = "";
+        QString http_header_device_locale = "";
+        QString http_header_device_os = "";
+        QString http_header_ver_os = "";
+        QString http_header_device_model = "";
+        QString http_header_accept_encoding = "";
+        QString http_header_accept = "";
         bool sub_clear = false;
         int sub_auto_update = -30;
         bool sub_send_hwid = false;
@@ -287,7 +295,27 @@ namespace Configs {
 
         void UpdateStartedId(int id);
 
+        static QString NormalizeHttpHwid(const QString &value);
+
+        static QString GenerateHttpHwid();
+
         [[nodiscard]] QString GetUserAgent(bool isDefault = false) const;
+
+        [[nodiscard]] QString GetHappUserAgent(bool isDefault = false) const;
+
+        [[nodiscard]] QString GetHttpHeaderHwid(bool isDefault = false) const;
+
+        [[nodiscard]] QString GetHttpHeaderDeviceLocale(bool isDefault = false) const;
+
+        [[nodiscard]] QString GetHttpHeaderDeviceOs(bool isDefault = false) const;
+
+        [[nodiscard]] QString GetHttpHeaderVerOs(bool isDefault = false) const;
+
+        [[nodiscard]] QString GetHttpHeaderDeviceModel(bool isDefault = false) const;
+
+        [[nodiscard]] QString GetHttpHeaderAcceptEncoding(bool isDefault = false) const;
+
+        [[nodiscard]] QString GetHttpHeaderAccept(bool isDefault = false) const;
     };
 
     extern DataStore *dataStore;

@@ -8,12 +8,56 @@
 #include <nekobox/configs/proxy/AbstractBean.hpp>
 #include <qnamespace.h>
 #include <QCoreApplication>
+#include <QLocale>
 #include <nekobox/configs/proxy/includes.h>
 #include <nekobox/dataStore/Database.hpp>
 
 
 namespace Configs
 {
+
+namespace {
+QString DisplayLeadingFlagAsCountry(const QString &value) {
+    const auto codePoints = value.toUcs4();
+    if (codePoints.size() < 2)
+        return value;
+
+    constexpr char32_t regionalIndicatorA = 0x1F1E6;
+    constexpr char32_t regionalIndicatorZ = 0x1F1FF;
+    const auto first = static_cast<char32_t>(codePoints.at(0));
+    const auto second = static_cast<char32_t>(codePoints.at(1));
+    if (first < regionalIndicatorA || first > regionalIndicatorZ ||
+        second < regionalIndicatorA || second > regionalIndicatorZ) {
+        return value;
+    }
+
+    QString countryCode;
+    countryCode += QChar::fromLatin1(
+        static_cast<char>('A' + first - regionalIndicatorA));
+    countryCode += QChar::fromLatin1(
+        static_cast<char>('A' + second - regionalIndicatorA));
+
+    const QLocale countryLocale(QStringLiteral("en_") + countryCode);
+    const auto territory = countryLocale.territory();
+    auto countryName = territory == QLocale::AnyTerritory
+                           ? QString{}
+                           : QLocale::territoryToString(territory);
+    if (countryName.isEmpty())
+        countryName = countryCode;
+
+    // Two regional-indicator code points occupy four UTF-16 code units.
+    const auto remainder = value.mid(4).trimmed();
+    if (remainder.isEmpty())
+        return countryName;
+    if (remainder.startsWith(countryName, Qt::CaseInsensitive) ||
+        remainder.startsWith(countryCode, Qt::CaseInsensitive) ||
+        (countryCode == "US" &&
+         remainder.startsWith("USA", Qt::CaseInsensitive))) {
+        return remainder;
+    }
+    return QStringLiteral("%1 - %2").arg(countryName, remainder);
+}
+} // namespace
 
 
 [[nodiscard]]  QString ProxyEntity::DisplayAddress(){
@@ -22,7 +66,7 @@ namespace Configs
 }
 
 [[nodiscard]]  QString ProxyEntity::DisplayName(){
-    return name;
+    return DisplayLeadingFlagAsCountry(name);
 }
 
 [[nodiscard]]  QString ProxyEntity::DisplayCoreType(){
@@ -35,7 +79,7 @@ namespace Configs
 }
 
 [[nodiscard]]  QString ProxyEntity::DisplayTypeAndName(){
-    return "[" + DisplayType() + "]" + name;
+    return "[" + DisplayType() + "]" + DisplayName();
 }
 
     #define _add(map1, X, Y, B) _put(map1, X, &this->Y)
