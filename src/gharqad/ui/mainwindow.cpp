@@ -934,7 +934,7 @@ MainWindow::MainWindow(QWidget *parent)
     runOnUiThread([=, this] { show_log_impl(log); });
   };
   MW_show_log(QStringLiteral("[Startup] NekoBox %1 started")
-                  .arg(QStringLiteral(NKR_VERSION)));
+                  .arg(QString::fromUtf8(NKR_VERSION)));
 
   // Listen port if random
   if (Configs::dataStore->random_inbound_port) {
