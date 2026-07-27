@@ -54,6 +54,7 @@ namespace Configs_sys {
     private:
         bool show_stderr = false;
         bool failed_to_start = false;
+        bool has_reached_running_state = false;
         QMutex restarting;
 
         QElapsedTimer coreRestartTimer;

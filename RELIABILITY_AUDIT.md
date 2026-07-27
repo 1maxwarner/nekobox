@@ -29,6 +29,8 @@ Audit date: 2026-07-27
    it for null.
 7. Runtime logs were primarily held in the GUI and were not useful after a
    process exit.
+8. A failed initial core launch could be mistaken for a crash, causing a
+   redundant restart attempt and a misleading shutdown-timeout warning.
 
 ## Applied mitigations
 
@@ -41,6 +43,8 @@ Audit date: 2026-07-27
 - Release the restart mutex on every rate-limit path.
 - Correct the timeout persistence mapping and the null-check order.
 - Persist sanitized runtime logs with two-file rotation.
+- Only auto-restart a core that previously reached the running state, and do
+  not wait for termination when the process is already stopped.
 
 ## Remaining validation
 

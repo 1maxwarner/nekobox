@@ -49,6 +49,8 @@ namespace Configs_sys {
     }
 
     void CoreProcess::Kill() {
+        if (process.state() == QProcess::NotRunning)
+            return;
         process.kill();
         if (!process.waitForFinished(3000)) {
             MW_show_log("[Warn] Timed out waiting for the core to stop.");
@@ -108,6 +110,7 @@ namespace Configs_sys {
         connect(&process, &QProcess::stateChanged, this, [&](QProcess::ProcessState state) {
             if (state == QProcess::Running){
                 Configs::dataStore->core_running = true;
+                has_reached_running_state = true;
             }
 
             if (state == QProcess::NotRunning) {
@@ -116,7 +119,12 @@ namespace Configs_sys {
             }
 
             if (!Configs::dataStore->prepare_exit && state == QProcess::NotRunning) {
-                if (failed_to_start) return; // no retry
+                // QProcess may emit NotRunning before errorOccurred updates our
+                // flag. Consult both sources to avoid a pointless restart loop
+                // when the core executable cannot be launched.
+                if (!has_reached_running_state || failed_to_start ||
+                    process.error() == QProcess::FailedToStart)
+                    return; // no retry
                 bool restarting = !this->restarting.tryLock();
 
                 if (restarting) return;
@@ -196,10 +204,12 @@ namespace Configs_sys {
 
     void CoreProcess::Restart() {
         if (!restarting.tryLock()) return;
-        process.kill();
-        if (!process.waitForFinished(3000)) {
-            MW_show_log(
-                "[Warn] Timed out waiting for the old core during restart.");
+        if (process.state() != QProcess::NotRunning) {
+            process.kill();
+            if (!process.waitForFinished(3000)) {
+                MW_show_log(
+                    "[Warn] Timed out waiting for the old core during restart.");
+            }
         }
         started = false;
         failed_to_start = false;
