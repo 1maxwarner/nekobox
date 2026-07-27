@@ -244,7 +244,15 @@ jobs:
       - build-go
       - get-tag-and-changelog
     runs-on: ubuntu-latest
-    if: github.event.inputs.publish == 'true' && github.event.inputs.binary_only == 'false' && github.event.inputs.pre_release == 'false'
+    if: >-
+      github.event.inputs.publish == 'true' &&
+      github.event.inputs.binary_only == 'false' &&
+      github.event.inputs.pre_release == 'false' &&
+      (github.event.inputs.publish_ppa == 'true' ||
+       github.event.inputs.publish_suse == 'true' ||
+       github.event.inputs.publish_copr == 'true' ||
+       github.event.inputs.publish_obs == 'true' ||
+       github.event.inputs.publish_aur == 'true')
     steps:
       - name: Checking out sources
         uses: actions/checkout@main
