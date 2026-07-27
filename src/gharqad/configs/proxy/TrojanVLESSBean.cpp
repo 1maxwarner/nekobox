@@ -64,9 +64,14 @@ namespace Configs {
         add_network(this, query);
         // security
 
-        auto network =  GetQueryValue(query, "type", "tcp");
+        auto network = GetQueryValue(query, "type", "tcp").toLower();
         if (network == "h2") {
             network = "http";
+        } else if (network == "splithttp" || network == "split-http") {
+            // Xray used "splithttp" before the transport was renamed to XHTTP.
+            // The bundled sing-box fork expects the current "xhttp" spelling,
+            // including when the outbound is used by the Windows TUN/VPN mode.
+            network = "xhttp";
         }
         *stream->network = network;
 
@@ -118,8 +123,9 @@ namespace Configs {
             stream->host = GetQueryValue(query, "host", "");
             stream->xhttp_mode = GetQueryValue(query, "mode", "auto");
             stream->xhttp_extra = GetQueryValue(query, "extra", "");
-            const auto padding =
-                GetQueryValue(query, "x_padding_bytes", "");
+            auto padding = GetQueryValue(query, "x_padding_bytes", "");
+            if (padding.isEmpty())
+                padding = GetQueryValue(query, "xPaddingBytes", "");
             if (!padding.isEmpty()) {
                 auto extra =
                     QJsonDocument::fromJson(stream->xhttp_extra.toUtf8())

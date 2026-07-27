@@ -56,10 +56,14 @@ namespace Configs
         QString network;
         if (!isYaml){
             transport1 = &obj["transport"];
-            *stream->network = network = transport1->at("type").toString();
+            *stream->network = network = transport1->at("type").toString().toLower();
         } else {
-            *stream->network = network = obj.at("network").toString();
+            *stream->network = network = obj.at("network").toString().toLower();
             transport1 = &obj[network + "-opts"];
+        }
+        if (network == "splithttp" || network == "split-http") {
+            network = "xhttp";
+            *stream->network = network;
         }
         const Data::Node & transport = *transport1;
         if (network == "ws" || network == "httpupgrade")

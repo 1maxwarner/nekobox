@@ -122,9 +122,11 @@ namespace Configs {
             set_boolean("authenticated_length", authenticated_length, query);
             add_network(this, query);
             // security
-            auto network = GetQueryValue(query, "type", "tcp");
+            auto network = GetQueryValue(query, "type", "tcp").toLower();
             if (network == "h2") {
                 network = "http";
+            } else if (network == "splithttp" || network == "split-http") {
+                network = "xhttp";
             }
             *stream->network = network;
             stream->security = GetQueryValue(query, "security", "tls").replace("reality", "tls");
@@ -169,8 +171,9 @@ namespace Configs {
                 stream->host = GetQueryValue(query, "host", "");
                 stream->xhttp_mode = GetQueryValue(query, "mode", "auto");
                 stream->xhttp_extra = GetQueryValue(query, "extra", "");
-                const auto padding =
-                    GetQueryValue(query, "x_padding_bytes", "");
+                auto padding = GetQueryValue(query, "x_padding_bytes", "");
+                if (padding.isEmpty())
+                    padding = GetQueryValue(query, "xPaddingBytes", "");
                 if (!padding.isEmpty()) {
                     auto extra =
                         QJsonDocument::fromJson(stream->xhttp_extra.toUtf8())

@@ -380,8 +380,11 @@ static QJsonObject convertV2RayNToSingBox(const QJsonObject &v2rayn) {
   }
 
   auto security = streamSettings["security"].toString();
-  auto network = streamSettings["network"].toString();
+  auto network = streamSettings["network"].toString().toLower();
   if (network.isEmpty()) network = "tcp";
+  const bool legacySplitHttp =
+      network == "splithttp" || network == "split-http";
+  if (legacySplitHttp) network = "xhttp";
 
   if (security == "tls" || security == "reality" || security == "xtls") {
     QJsonObject tls;
@@ -454,15 +457,14 @@ static QJsonObject convertV2RayNToSingBox(const QJsonObject &v2rayn) {
     auto s = streamSettings["httpupgradeSettings"].toObject();
     transport["path"] = s["path"].toString();
     transport["host"] = s["host"].toString();
-  } else if (network == "splithttp") {
-    auto s = streamSettings["splithttpSettings"].toObject();
-    transport["path"] = s["path"].toString();
-    transport["host"] = s["host"].toString();
   } else if (network == "xhttp") {
-    auto s = streamSettings["xhttpSettings"].toObject();
+    auto s = streamSettings[legacySplitHttp ? "splithttpSettings"
+                                            : "xhttpSettings"]
+                 .toObject();
     transport["path"] = s["path"].toString();
     transport["host"] = s["host"].toString();
-    transport["mode"] = s["mode"].toString();
+    const auto mode = s["mode"].toString();
+    transport["mode"] = mode.isEmpty() ? "auto" : mode;
     const auto extra = s["extra"].toObject();
     for (auto it = extra.begin(); it != extra.end(); ++it) {
       transport[it.key()] = it.value();
