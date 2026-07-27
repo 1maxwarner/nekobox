@@ -173,7 +173,8 @@ namespace Configs {
 
             size_t count() const;
 
-            KeyValueRange<QMap<EnumFieldName, Configs::Data::Node> &> asKeyValueRange() const;
+            KeyValueRange<const QMap<EnumFieldName, Configs::Data::Node> &>
+            asKeyValueRange() const;
 
             QList<EnumFieldName> keys() const;
             QList<Node> values() const;

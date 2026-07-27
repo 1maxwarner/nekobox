@@ -44,6 +44,9 @@ integration test.
 - Core shutdown/restart waits are bounded, and failed initial launches are not
   misclassified as crashes.
 - Runtime logs are persisted with rotation.
+- Config-node lookup no longer recurses into stack overflow, array growth no
+  longer loops forever, and key/value iteration no longer references a
+  destroyed temporary map.
 - VLESS XHTTP, legacy SplitHTTP aliases, HAPP links/headers, JSON subscription
   variants, decoded response titles, leading-flag country names, and routing
   profile enable/priority state are supported.

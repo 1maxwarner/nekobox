@@ -276,7 +276,7 @@ QColor StartStopButton::modeColor(Icon::TrayIconStatus m) const {
 
 QColor StartStopButton::idleRingColor() const {
     QColor c = palette().color(QPalette::WindowText);
-    c.setAlphaF(0.12);
+    c.setAlphaF(0.12f);
     return c;
 }
 
@@ -362,7 +362,7 @@ void StartStopButton::paintEvent(QPaintEvent *) {
 
         p.setBrush(Qt::NoBrush);
         QColor base = m_ringColor.lighter(static_cast<int>(101 + 9 * pulse));
-        base.setAlphaF(0.95);
+        base.setAlphaF(0.95f);
         QConicalGradient cg(c, 90.0);
         cg.setColorAt(0.0, base.lighter(116));
         cg.setColorAt(0.5, base);

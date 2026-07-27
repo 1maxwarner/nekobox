@@ -8,3 +8,4 @@
 - feat: embed Inter V as the default interface font
 - fix: recreate core, TUN and QUIC sessions after Windows resume
 - fix: retry DNS through a fresh session after repeated remote QUIC stream closures
+- fix: prevent config-node recursion, dangling iteration and out-of-range hangs

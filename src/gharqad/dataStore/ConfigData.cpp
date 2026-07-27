@@ -133,7 +133,7 @@ namespace Configs {
     };  
     bool Node::toBoolean() const {
       if (isNumber() || isString() || isBoolean()){
-        return this->isNumber() > 0;
+        return this->toNumber() > 0;
       } else if (isArray() || isMap()){
         return count() > 0;
       } else {
@@ -215,11 +215,11 @@ namespace Configs {
       return std::get<QMap<EnumFieldName, Node>>(this->value).keys();
     }
 
-    KeyValueRange<QMap<EnumFieldName, Configs::Data::Node> &> Node::asKeyValueRange() const {
-      QMap<EnumFieldName, Configs::Data::Node> map;
-      if (isMap()){
-        map = std::get<QMap<EnumFieldName, Node>>(this->value);
-      } 
+    KeyValueRange<const QMap<EnumFieldName, Configs::Data::Node> &>
+    Node::asKeyValueRange() const {
+      static const QMap<EnumFieldName, Configs::Data::Node> emptyMap;
+      const auto &map =
+          isMap() ? std::get<QMap<EnumFieldName, Node>>(this->value) : emptyMap;
       return ::asKeyValueRange(map);
     }
 
@@ -316,31 +316,24 @@ namespace Configs {
 
 
     const Node & Node::at(size_t index) const {
-      static Node node;
+      static const Node undefinedNode = Node::undefined();
       if (this->isArray()){
-        auto &list = std::get<QList<Node>>(this->value);
-        if (list.count() <= index){
-          goto return_undefined;
-        }
-        return list.at(index);
-      } else {
-        return_undefined:
-        node = Node::undefined();
-        return node;
+        const auto &list = std::get<QList<Node>>(this->value);
+        if (index < static_cast<size_t>(list.size()))
+          return list.at(static_cast<qsizetype>(index));
       }
+      return undefinedNode;
     };
     Node & Node::at(size_t index) {
-      static Node node;
+      static thread_local Node undefinedNode = Node::undefined();
       if (this->isArray()){
-        auto count = this->count();
-        while (count <= index){
-          this->addLast(Node::null());
-        }
-        return std::get<QList<Node>>(this->value)[index];
-      } else {
-        node = Node::undefined();
-        return node;
+        auto &list = std::get<QList<Node>>(this->value);
+        while (static_cast<size_t>(list.size()) <= index)
+          list.push_back(Node::null());
+        return list[static_cast<qsizetype>(index)];
       }
+      undefinedNode = Node::undefined();
+      return undefinedNode;
     };
 
     const Node & Node::at(const QList<EnumFieldName>& index) const {
@@ -375,11 +368,11 @@ namespace Configs {
     };
 
     const Node & Node::at(const EnumFieldName& t) const {
-      return this->at({t});
+      return this->at(QList<EnumFieldName>{t});
     };
 
     Node & Node::at(const EnumFieldName& t) {
-      return this->at({t});
+      return this->at(QList<EnumFieldName>{t});
     };
 
     bool Node::isNothing() const {

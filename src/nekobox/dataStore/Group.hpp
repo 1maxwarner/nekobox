@@ -13,7 +13,7 @@
 namespace Configs
 {
     struct GroupExtra;
-    struct Group;
+    class Group;
     extern std::map<int, std::weak_ptr<GroupExtra>> weakExtraMap;
 
     std::shared_ptr<const GroupExtra> GetExtra(std::shared_ptr<Group>);

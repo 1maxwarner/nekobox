@@ -101,7 +101,7 @@ namespace Configs
             if (uot_obj.isObject()) {
                 auto &uot_obj_j = uot_obj;
                 uot = uot_obj_j["enabled"].toBool();
-                if (uot == true){
+                if (uot != 0){
                     auto &uot_obj_v = uot_obj_j["version"];
                     if (uot_obj_v.isDouble()){
                         uot = uot_obj_v.toInt();

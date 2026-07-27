@@ -752,13 +752,13 @@ MainWindow::MainWindow(QWidget *parent)
   //
 
 #ifdef Q_OS_MACOS
-  goto disrespect_mac_users;
+  constexpr bool isMacOS = true;
+#else
+  const bool isMacOS = QOperatingSystemVersion::currentType() ==
+                       QOperatingSystemVersion::MacOS;
 #endif
-
-  if (QOperatingSystemVersion::currentType() ==
-    QOperatingSystemVersion::MacOS) {
+  if (isMacOS) {
     // Running on macOS
-    disrespect_mac_users:
     QMessageBox::warning(this, "Iblis The Master",
                          tr("Using on macOS is not permitted"));
     return;
@@ -1845,7 +1845,7 @@ skip_updater_hide:
     hide();
   }
 #ifndef SKIP_UPDATE_BUTTON
-  if (Configs::windowSettings->startup_update == true) {
+  if (Configs::windowSettings->startup_update) {
     runOnNewThread([=, this] { CheckUpdate(); });
   }
 #endif
