@@ -66,6 +66,6 @@ profile is generated.
 ## Core
 
 The core is pinned to the private
-`fabbiodev/nekobox-sing-box-core@91655874690d`, based on
+`fabbiodev/nekobox-sing-box-core@2782f5f906fc`, based on
 `qr243vbi/sing-box v1.13.14-mod3`. It contains the XHTTP implementation and
 the DNS/QUIC recovery changes used by this build.
