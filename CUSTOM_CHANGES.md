@@ -46,6 +46,15 @@ profile is generated.
   list or with the adjacent toggle button. At least one profile remains
   enabled.
 - Enabled state and priority are preserved by route profile import/export.
+- A detailed Russian guide with examples is available in
+  `docs/ROUTING_RU.md`.
+
+## Interface
+
+- The Inter V variable font is embedded into the executable and used as the
+  default interface font.
+- An explicitly selected font in the application settings still takes
+  precedence, and log views retain their fixed-width font.
 
 ## Core
 

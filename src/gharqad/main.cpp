@@ -269,6 +269,20 @@ int main(int argc, char **argv) {
   QApplication::setQuitOnLastWindowClosed(false);
   QApplication a(argc, argv);
 
+  const int interfaceFontId =
+      QFontDatabase::addApplicationFont(":/fonts/InterV.ttf");
+  if (interfaceFontId >= 0) {
+    const QStringList interfaceFontFamilies =
+        QFontDatabase::applicationFontFamilies(interfaceFontId);
+    if (!interfaceFontFamilies.isEmpty()) {
+      QFont interfaceFont = QApplication::font();
+      interfaceFont.setFamily(interfaceFontFamilies.first());
+      QApplication::setFont(interfaceFont);
+    }
+  } else {
+    qWarning() << "could not load the embedded Inter V font";
+  }
+
   QString deeplink = "";
 
   // Flags

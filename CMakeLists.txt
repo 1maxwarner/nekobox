@@ -290,6 +290,7 @@ set(PROJECT_SOURCES
         ${NYXARIA}/ui/mainwindow.ui
 
         res/nekobox.qrc
+        res/fonts/inter.qrc
         ${QV2RAY_RC}
         res/darkstyle.qrc
         res/qss/feiyangqingyun/qss.qrc
