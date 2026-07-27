@@ -32,6 +32,12 @@ static QByteArray decodeQuotedPrintableWord(QByteArray value) {
   QByteArray decoded;
   decoded.reserve(value.size());
   for (qsizetype i = 0; i < value.size(); ++i) {
+    // RFC 2047 Q-encoding represents spaces as underscores inside encoded
+    // words. This differs from ordinary quoted-printable bodies.
+    if (value[i] == '_') {
+      decoded.append(' ');
+      continue;
+    }
     if (value[i] == '=' && i + 2 < value.size()) {
       bool ok = false;
       const auto byte = value.mid(i + 1, 2).toUInt(&ok, 16);
@@ -107,7 +113,7 @@ static QString normalizeSubscriptionTitle(QString title) {
 
 static QString titleFromContentDisposition(const QString &header) {
   static const QRegularExpression encodedFilename(
-      QStringLiteral(R"(filename\*\s*=\s*([^']*)''([^;]+))"),
+      QStringLiteral(R"(filename\*\s*=\s*([^']*)'[^']*'([^;]+))"),
       QRegularExpression::CaseInsensitiveOption);
   auto match = encodedFilename.match(header);
   if (match.hasMatch()) {

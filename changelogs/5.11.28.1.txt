@@ -2,6 +2,7 @@
 - fix: cap MTU of nested WG/AWG hops, let their IPv6 socket bind
 - fix: sort endpoint-type chain hops into "endpoints" when testing
 - feat: import HAPP-compatible and JSON subscriptions with decoded titles
+- fix: decode RFC 2047 Q titles and RFC 8187 filename languages correctly
 - feat: support VLESS XHTTP in proxy and Windows TUN configurations
 - feat: enable, disable and prioritize routing profiles
 - feat: embed Inter V as the default interface font
