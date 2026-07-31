@@ -93,6 +93,12 @@ QString DisplayLeadingFlagAsCountry(const QString &value) {
         return Preset::SingBox::OutboundTypes.contains(this->type);
     }
 
+    bool ProxyEntity::IsFullConfig() const {
+        if (this->type != "custom") return false;
+        auto bean = CustomBean();
+        return bean != nullptr && bean->core == "internal-full";
+    }
+
     void ProxyEntity::ResetBeans(){
         this->weak_bean.reset();
         this->strong_bean.reset();

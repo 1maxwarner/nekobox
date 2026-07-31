@@ -50,7 +50,7 @@ integration test.
 - VLESS XHTTP, legacy SplitHTTP aliases, HAPP links/headers, JSON subscription
   variants, decoded response titles, leading-flag country names, and routing
   profile enable/priority state are supported.
-- The core is based on sing-box `v1.13.14`, which is the latest stable upstream
+- The core is based on sing-box `v1.13.15`, which is the latest stable upstream
   release as of the audit date. Updating beyond it would currently mean moving
   to an upstream pre-release or development commit.
 
@@ -245,7 +245,7 @@ activation limits.
 - Recovery actions are visible only in text logs. A compact status such as
   “interface changed → sessions reset → DNS retry succeeded” would make support
   substantially easier.
-- The custom core identifies itself as upstream `v1.13.14`; adding a fork
+- The custom core identifies itself as upstream `v1.13.15`; adding a fork
   revision/build commit to diagnostics would make bug reports reproducible.
 
 ## Recommended delivery order
@@ -266,7 +266,7 @@ activation limits.
   and forced XMUX recreation
 - clean local Windows Release build of GUI, private core, and updater
 - `go version -m` verification of private core revision
-  `e9b14f594644b7e55e0fbe38ef648bf01b1af325`
+  `3a08845631e4d61adc24e274c974ffd9594d22d9`
 - live VLESS Reality checks: gRPC returned HTTP 204; two current XHTTP
   profiles returned HTTP 204, including 12 consecutive requests without loss
 - independent Xray-core control check confirmed that the supplied legacy XHTTP
