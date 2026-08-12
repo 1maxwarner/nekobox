@@ -86,7 +86,7 @@ bool SmartGameModMatch(const QString &corpus, const QString &query) {
 QHash<QString, int> ParseGameModProfileAssignments(const QString &json) {
     QHash<QString, int> result;
     const auto object = QJsonDocument::fromJson(json.toUtf8()).object();
-    for (auto it = object.cbegin(); it != object.cend(); ++it) {
+    for (auto it = object.constBegin(); it != object.constEnd(); ++it) {
         if (it.value().isDouble())
             result.insert(it.key(), it.value().toInt(-1));
     }

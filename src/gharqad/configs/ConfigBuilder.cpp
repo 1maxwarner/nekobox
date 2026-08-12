@@ -949,7 +949,7 @@ static QHash<QString, int> GameModProfileAssignments() {
   const auto object = QJsonDocument::fromJson(
                           dataStore->routing->game_mod_service_profiles.toUtf8())
                           .object();
-  for (auto it = object.cbegin(); it != object.cend(); ++it) {
+  for (auto it = object.constBegin(); it != object.constEnd(); ++it) {
     if (it.value().isDouble())
       result.insert(it.key(), it.value().toInt(-1));
   }
