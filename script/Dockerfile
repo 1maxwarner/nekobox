@@ -11,10 +11,10 @@ RUN echo "I am running on $BUILDPLATFORM, building for $TARGETPLATFORM"
 # 404 while per-architecture repository indexes are being synchronized.
 RUN set -eux; \
     installed=0; \
-    for repository in \
-      https://repo-fastly.voidlinux.org/current \
-      https://repo-default.voidlinux.org/current; do \
-      printf 'repository=%s\n' "$repository" > /etc/xbps.d/00-repository-main.conf; \
+    for mirror in \
+      https://repo-fastly.voidlinux.org \
+      https://repo-default.voidlinux.org; do \
+      sed -i "s|https://repo-[^/]\\+\\.voidlinux\\.org|$mirror|g" /usr/share/xbps.d/*-repository-*.conf; \
       if xbps-install -Syu -y \
         bash cmake git ninja jq curl ccache wget sed util-linux coreutils shadow squashfs-tools \
         qt6-base-devel thrift-devel openssl-devel boost-devel lmdb-devel acl-devel libunistring-devel \
