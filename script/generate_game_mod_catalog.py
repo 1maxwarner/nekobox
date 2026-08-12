@@ -80,7 +80,8 @@ def convert_rule(route: dict[str, Any], definitions: dict[str, list[str]]) -> di
         if start == end:
             ports.append(start)
         else:
-            port_ranges.append(f"{start}-{end}")
+            # sing-box uses a colon for inclusive port ranges.
+            port_ranges.append(f"{start}:{end}")
 
     for value in route.get("remote_ports", []):
         value = str(value).strip()

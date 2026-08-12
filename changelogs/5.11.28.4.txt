@@ -1,0 +1,2 @@
+- fix: generate sing-box-compatible Game Mod port ranges
+- fix: prevent Discord and other selected services from breaking router initialization
