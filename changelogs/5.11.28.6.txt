@@ -7,3 +7,4 @@
 - perf: replace per-service widgets with a lightweight category sidebar and service grid
 - feat: add live ping, server switching, and removal controls to enabled services
 - feat: add a League Launcher route for 3.64.0.0/12
+- fix: retain ExitLag application 2784 (FACEIT) when its exported profile link is empty

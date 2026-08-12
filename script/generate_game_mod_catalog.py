@@ -28,6 +28,37 @@ PROFILE_ALIASES = {
     "the division 2": {"thedivision2.exe"},
 }
 
+# A small number of ExitLag applications have an icon record but no linked
+# profile in an export. Keep these records in Game Mod when we have a reliable
+# route definition, instead of silently dropping them with the no-rule apps.
+MANUAL_APPLICATION_RULES = {
+    "2784": [
+        {
+            "action": "route",
+            "outbound": "proxy",
+            "process_name": [
+                "FACEIT.exe",
+                "FACEITClient.exe",
+                "FACEITAntiCheat.exe",
+                "FACEITAC.exe",
+            ],
+        },
+        {
+            "action": "route",
+            "outbound": "proxy",
+            "domain_suffix": [
+                "faceit.com",
+                "faceitcdn.com",
+                "faceit-cdn.net",
+            ],
+        },
+    ],
+}
+
+MANUAL_APPLICATION_ALIASES = {
+    "2784": ["FACEIT", "FACEIT client", "FACEIT anti-cheat", "FACEIT AC"],
+}
+
 DISPLAY_NAMES = {
     "chatgpt": "ChatGPT",
     "discord": "Discord",
@@ -438,6 +469,11 @@ def build(
                 if converted is not None and converted not in rules:
                     rules.append(converted)
 
+        application_id = application["id"]
+        rules.extend(MANUAL_APPLICATION_RULES.get(application_id, []))
+        for rule in MANUAL_APPLICATION_RULES.get(application_id, []):
+            keywords.extend(rule.get("process_name", []))
+
         if not rules:
             continue
 
@@ -455,11 +491,14 @@ def build(
         proxy_count = sum(rule["outbound"] == "proxy" for rule in rules)
         services.append(
             {
-                "id": application["id"],
+                "id": application_id,
                 "name": application["name"],
                 "icon": [column * ICON_SIZE, row * ICON_SIZE, ICON_SIZE, ICON_SIZE],
                 "keywords": unique([value for value in keywords if value]),
-                "aliases": service_aliases(application["name"]),
+                "aliases": unique(
+                    service_aliases(application["name"])
+                    + MANUAL_APPLICATION_ALIASES.get(application_id, [])
+                ),
                 "category": category_for_service(application["name"]),
                 "source": "exitlag",
                 "direct_rule_count": direct_count,
