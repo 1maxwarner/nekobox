@@ -1,8 +1,19 @@
 #include <nekobox/ui/setting/dialog_manage_routes.h>
+#include <nekobox/ui/setting/GameModCatalog.h>
 #include <nekobox/configs/warp/warp.hpp>
 #include <nekobox/configs/proxy/WireguardBean.h>
 
 #include <QClipboard>
+#include <QAbstractItemView>
+#include <QHBoxLayout>
+#include <QIcon>
+#include <QLabel>
+#include <QLineEdit>
+#include <QListWidget>
+#include <QPushButton>
+#include <QSet>
+#include <QSignalBlocker>
+#include <QVBoxLayout>
 #include <algorithm>
 #include <memory>
 
@@ -131,7 +142,153 @@ bool DialogManageRoutes::validate_dns_rules(const QString &rawString) {
     return true;
 }
 
-DialogManageRoutes::DialogManageRoutes(QWidget *parent, bool EditRouteProfiles) : QDialog(parent), ui(new Ui::DialogManageRoutes) {
+void DialogManageRoutes::setupGameModTab() {
+    gameModTab = new QWidget(ui->routes_tab);
+    gameModTab->setObjectName(QStringLiteral("game_mod_tab"));
+    auto *layout = new QVBoxLayout(gameModTab);
+    layout->setContentsMargins(16, 16, 16, 16);
+    layout->setSpacing(12);
+
+    auto *title = new QLabel(tr("Game Mod"), gameModTab);
+    auto titleFont = title->font();
+    titleFont.setBold(true);
+    titleFont.setPointSize(titleFont.pointSize() + 2);
+    title->setFont(titleFont);
+    layout->addWidget(title);
+
+    auto *description = new QLabel(
+        tr("Choose which games and services should use the proxy. "
+           "Checked services add their optimized process, domain, address, "
+           "and port rules before the current routing profile."),
+        gameModTab);
+    description->setWordWrap(true);
+    description->setTextInteractionFlags(Qt::TextSelectableByMouse);
+    layout->addWidget(description);
+
+    auto *toolbar = new QHBoxLayout();
+    toolbar->setSpacing(8);
+    gameModSearch = new QLineEdit(gameModTab);
+    gameModSearch->setObjectName(QStringLiteral("game_mod_search"));
+    gameModSearch->setPlaceholderText(tr("Search games, services, or processes"));
+    gameModSearch->setClearButtonEnabled(true);
+    gameModSearch->setMinimumHeight(34);
+    toolbar->addWidget(gameModSearch, 1);
+
+    gameModSelectVisible = new QPushButton(tr("Enable shown"), gameModTab);
+    gameModClearVisible = new QPushButton(tr("Disable shown"), gameModTab);
+    gameModSelectVisible->setObjectName(QStringLiteral("game_mod_enable_shown"));
+    gameModClearVisible->setObjectName(QStringLiteral("game_mod_disable_shown"));
+    toolbar->addWidget(gameModSelectVisible);
+    toolbar->addWidget(gameModClearVisible);
+    layout->addLayout(toolbar);
+
+    gameModSummary = new QLabel(gameModTab);
+    gameModSummary->setObjectName(QStringLiteral("game_mod_summary"));
+    layout->addWidget(gameModSummary);
+
+    gameModServices = new QListWidget(gameModTab);
+    gameModServices->setObjectName(QStringLiteral("game_mod_services"));
+    gameModServices->setIconSize(QSize(40, 40));
+    gameModServices->setUniformItemSizes(true);
+    gameModServices->setAlternatingRowColors(true);
+    gameModServices->setVerticalScrollMode(QAbstractItemView::ScrollPerPixel);
+    layout->addWidget(gameModServices, 1);
+
+    QString catalogError;
+    const auto services = GameMod::LoadServices(&catalogError);
+    const auto atlas = GameMod::LoadIconAtlas(&catalogError);
+    const QSet<QString> enabled(
+        Configs::dataStore->routing->game_mod_enabled_services.cbegin(),
+        Configs::dataStore->routing->game_mod_enabled_services.cend());
+
+    for (const auto &service : services) {
+        auto displayName = service.name;
+        if (!displayName.isEmpty())
+            displayName[0] = displayName.at(0).toUpper();
+        const auto details = tr("%1 proxy rules, %2 direct rules")
+                                 .arg(service.proxyRuleCount)
+                                 .arg(service.directRuleCount);
+        auto *item = new QListWidgetItem(
+            atlas.isNull() ? QIcon() : QIcon(atlas.copy(service.iconRect)),
+            displayName + QStringLiteral("\n") + details,
+            gameModServices);
+        item->setFlags(item->flags() | Qt::ItemIsUserCheckable);
+        item->setCheckState(enabled.contains(service.id) ? Qt::Checked
+                                                         : Qt::Unchecked);
+        item->setData(Qt::UserRole, service.id);
+        item->setData(Qt::UserRole + 1,
+                      (service.name + QLatin1Char(' ') +
+                       service.keywords.join(QLatin1Char(' ')))
+                          .toCaseFolded());
+        item->setToolTip(tr("Processes: %1\n%2")
+                             .arg(service.keywords.join(QStringLiteral(", ")),
+                                  details));
+        item->setSizeHint(QSize(0, 58));
+    }
+
+    if (services.isEmpty()) {
+        auto *item = new QListWidgetItem(
+            catalogError.isEmpty() ? tr("No Game Mod services found")
+                                   : catalogError,
+            gameModServices);
+        item->setFlags(Qt::NoItemFlags);
+    }
+
+    connect(gameModSearch, &QLineEdit::textChanged, this,
+            &DialogManageRoutes::filterGameModServices);
+    connect(gameModServices, &QListWidget::itemChanged, this,
+            [this](QListWidgetItem *) { updateGameModSummary(); });
+    connect(gameModSelectVisible, &QPushButton::clicked, this,
+            [this] { setVisibleGameModServicesChecked(true); });
+    connect(gameModClearVisible, &QPushButton::clicked, this,
+            [this] { setVisibleGameModServicesChecked(false); });
+
+    ui->routes_tab->addTab(gameModTab, tr("Game Mod"));
+    updateGameModSummary();
+}
+
+void DialogManageRoutes::filterGameModServices(const QString &query) {
+    const auto needle = query.trimmed().toCaseFolded();
+    for (int row = 0; row < gameModServices->count(); ++row) {
+        auto *item = gameModServices->item(row);
+        item->setHidden(!needle.isEmpty() &&
+                        !item->data(Qt::UserRole + 1)
+                             .toString()
+                             .contains(needle));
+    }
+    updateGameModSummary();
+}
+
+void DialogManageRoutes::updateGameModSummary() {
+    int enabled = 0;
+    int visible = 0;
+    for (int row = 0; row < gameModServices->count(); ++row) {
+        const auto *item = gameModServices->item(row);
+        if (!item->isHidden())
+            ++visible;
+        if (item->checkState() == Qt::Checked)
+            ++enabled;
+    }
+    gameModSummary->setText(
+        tr("%1 enabled  |  %2 shown of %3 services")
+            .arg(enabled)
+            .arg(visible)
+            .arg(gameModServices->count()));
+}
+
+void DialogManageRoutes::setVisibleGameModServicesChecked(bool checked) {
+    QSignalBlocker blocker(gameModServices);
+    for (int row = 0; row < gameModServices->count(); ++row) {
+        auto *item = gameModServices->item(row);
+        if (!item->isHidden() && (item->flags() & Qt::ItemIsUserCheckable))
+            item->setCheckState(checked ? Qt::Checked : Qt::Unchecked);
+    }
+    updateGameModSummary();
+}
+
+DialogManageRoutes::DialogManageRoutes(QWidget *parent, bool EditRouteProfiles,
+                                       bool GameMod)
+    : QDialog(parent), ui(new Ui::DialogManageRoutes) {
     CHECK_SETTINGS_ACCESS
     ui->setupUi(this);
     auto profiles = Configs::profileManager->routes;
@@ -358,7 +515,11 @@ DialogManageRoutes::DialogManageRoutes(QWidget *parent, bool EditRouteProfiles) 
         ui->redirect_listenport->setEnabled(state);
     });
 
-    ui->routes_tab->setCurrentIndex(EditRouteProfiles ? 3 : 0);
+    setupGameModTab();
+    if (GameMod)
+        ui->routes_tab->setCurrentWidget(gameModTab);
+    else
+        ui->routes_tab->setCurrentIndex(EditRouteProfiles ? 3 : 0);
 
     // warp
     BindWarpGenerator(ui->warp_autogen,
@@ -484,6 +645,16 @@ void DialogManageRoutes::accept() {
     Configs::dataStore->core_box_underlying_dns = ui->local_override->text().trimmed();
     Configs::dataStore->routing->dns_final_out_direct = ui->dns_final_out->currentIndex() == 1;
     Configs::dataStore->fake_dns = ui->enable_fakeip->isChecked();
+
+    QStringList enabledGameModServices;
+    for (int row = 0; row < gameModServices->count(); ++row) {
+        const auto *item = gameModServices->item(row);
+        const auto serviceId = item->data(Qt::UserRole).toString();
+        if (!serviceId.isEmpty() && item->checkState() == Qt::Checked)
+            enabledGameModServices.append(serviceId);
+    }
+    Configs::dataStore->routing->game_mod_enabled_services =
+        enabledGameModServices;
 
     Configs::profileManager->UpdateRouteChains(chainList);
     Configs::dataStore->routing->current_route_id = currentRoute->id;

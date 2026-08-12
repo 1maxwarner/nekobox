@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.10)
 
-project(nekobox VERSION 5.11.28.2)
+project(nekobox VERSION 5.11.28.3)
 
 option(GENERATE_VERSION_AND_CHANGELOG "Generate only changelog and version" OFF)
 
@@ -401,7 +401,10 @@ add_custom_command(TARGET nekobox POST_BUILD
     COMMAND ${CMAKE_COMMAND} -E copy_if_different
         "${CMAKE_SOURCE_DIR}/res/public/check_routeprofiles.js"
         "$<TARGET_FILE_DIR:nekobox>/check_routeprofiles.js"
-    COMMENT "Copying happ crypt5 key data, scripts, about.html and languages.txt"
+    COMMAND ${CMAKE_COMMAND} -E copy_directory
+        "${CMAKE_SOURCE_DIR}/res/public/game_mod"
+        "$<TARGET_FILE_DIR:nekobox>/public/game_mod"
+    COMMENT "Copying runtime scripts, languages and Game Mod catalog"
 )
 
 set(LUPDATE_OPTIONS
@@ -636,6 +639,9 @@ install(FILES
     "${CMAKE_SOURCE_DIR}/res/public/check_routeprofiles.js"
     "${CMAKE_SOURCE_DIR}/res/public/expanded_rsa_keys.json"
     "${CMAKE_SOURCE_DIR}/res/languages.txt" DESTINATION "${PROGRAMPREFIX}/public"
+    COMPONENT gui)
+install(DIRECTORY "${CMAKE_SOURCE_DIR}/res/public/game_mod/"
+    DESTINATION "${PROGRAMPREFIX}/public/game_mod"
     COMPONENT gui)
 
 #install_if_exists(${CMAKE_SOURCE_DIR}/res/public/emoji.ttf "${PROGRAMPREFIX}/public")

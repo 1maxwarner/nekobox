@@ -9,6 +9,7 @@
 #include <nekobox/configs/proxy/includes.h>
 #include <nekobox/dataStore/DataStore.hpp>
 #include <nekobox/dataStore/Database.hpp>
+#include <nekobox/ui/setting/GameModCatalog.h>
 
 #include <QApplication>
 #include <QDateTime>
@@ -941,6 +942,14 @@ static void AppendMissingRuleSet(QJsonObject &route, const QJsonObject &ruleSet)
   route["rule_set"] = ruleSets;
 }
 
+static QJsonArray PrependGameModRules(const QJsonArray &routeRules) {
+  auto result =
+      GameMod::BuildRules(dataStore->routing->game_mod_enabled_services);
+  for (const auto &rule : routeRules)
+    result.append(rule);
+  return result;
+}
+
 static QJsonArray BuildNekoboxTunRulesForFullConfig(
     const std::shared_ptr<BuildConfigStatus> &status, QJsonObject &config) {
   auto routeChain =
@@ -999,7 +1008,8 @@ static QJsonArray BuildNekoboxTunRulesForFullConfig(
   }
   config["route"] = route;
 
-  auto routeRules = routeChain->get_route_rules(false, false, outboundMap);
+  auto routeRules = PrependGameModRules(
+      routeChain->get_route_rules(false, false, outboundMap));
   auto split = dataStore->routing->tun_split;
   if (!split->proxy.isEmpty()) {
     routeRules += QJsonObject{{"action", "route"},
@@ -1525,7 +1535,8 @@ skip_multiple_jobs:
       }
     }
 
-    auto routeRules = routeChain->get_route_rules(false, false, outboundMap);
+    auto routeRules = PrependGameModRules(
+        routeChain->get_route_rules(false, false, outboundMap));
 
     // tun process routing
     if (dataStore->spmode_vpn && !status->forTest) {

@@ -16,6 +16,11 @@
 #include <QVariantMap>
 #include <string>
 
+class QLabel;
+class QLineEdit;
+class QListWidget;
+class QPushButton;
+
 extern QVariantMap ruleSetMap;
 
 QT_BEGIN_NAMESPACE
@@ -28,7 +33,9 @@ class DialogManageRoutes : public QDialog {
     Q_OBJECT
 
 public:
-    explicit DialogManageRoutes(QWidget *parent = nullptr, bool EditRouteProfiles = false);
+    explicit DialogManageRoutes(QWidget *parent = nullptr,
+                                bool EditRouteProfiles = false,
+                                bool GameMod = false);
 
     ~DialogManageRoutes() override;
 
@@ -60,6 +67,10 @@ private:
     void reloadProfileItems();
     int selectedRouteIndex() const;
     void updateRouteProfileControls();
+    void setupGameModTab();
+    void filterGameModServices(const QString &query);
+    void updateGameModSummary();
+    void setVisibleGameModServicesChecked(bool checked);
 
     QList<std::shared_ptr<Configs::RoutingChain>> chainList;
 
@@ -75,6 +86,12 @@ private:
     QMutex warp_save;
 
     AutoCompleteTextEdit* rule_editor;
+    QLineEdit *gameModSearch = nullptr;
+    QListWidget *gameModServices = nullptr;
+    QLabel *gameModSummary = nullptr;
+    QPushButton *gameModSelectVisible = nullptr;
+    QPushButton *gameModClearVisible = nullptr;
+    QWidget *gameModTab = nullptr;
 public slots:
     void accept() override;
 

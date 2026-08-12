@@ -55,6 +55,12 @@ profile is generated.
 - Enabled state and priority are preserved by route profile import/export.
 - A detailed Russian guide with examples is available in
   `docs/ROUTING_RU.md`.
+- The Routing menu and settings dialog include a `Game Mod` service picker
+  with icon/process search, bulk enable/disable actions, and persistent
+  checkboxes.
+- Enabled Game Mod services prepend their catalog-provided process, domain,
+  address, protocol, and port rules to the active routing profile. `PASS`
+  rules use `direct`; `PROXIFY` rules use the active `proxy` outbound.
 
 ## Interface
 

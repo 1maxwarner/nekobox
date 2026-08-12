@@ -77,6 +77,9 @@ namespace Configs {
         int sniffing_mode = Configs::SniffingMode::FOR_ROUTING;
         int ruleset_mirror = Configs::Mirrors::CLOUDFLARE;
 
+        // Services selected in the visual Game Mod routing catalog.
+        QStringList game_mod_enabled_services = {};
+
         std::shared_ptr<TunSplit> tun_split = std::make_shared<TunSplit>();
 
         explicit Routing(int preset = 0);

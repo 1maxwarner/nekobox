@@ -654,6 +654,7 @@ QByteArray hash = QCryptographicHash::hash(
         ADD_MAP("use_dns_object", use_dns_object, boolean);
         ADD_MAP("dns_object", dns_object, string);
         ADD_MAP("dns_final_out_direct", dns_final_out_direct, boolean);
+        ADD_MAP("game_mod_enabled_services", game_mod_enabled_services, stringList);
 
         ADD_MAP("tun_split", tun_split, jsonStore);
     STOP_MAP

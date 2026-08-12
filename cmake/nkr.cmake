@@ -31,8 +31,10 @@ function(embeed_resources)
 	foreach(FILE_PATH IN LISTS STATIC_RESOURCE_FILES)
 		# Make path relative to project root
 		file(RELATIVE_PATH REL_PATH "${CMAKE_SOURCE_DIR}/res/public" "${FILE_PATH}")
-		file(COPY "${FILE_PATH}" DESTINATION "${CMAKE_BINARY_DIR}/")
-		file(APPEND ${QRC_FILE} "    <file>${RELATIVE_PATH}</file>\n")
+		get_filename_component(REL_DIR "${REL_PATH}" DIRECTORY)
+		file(MAKE_DIRECTORY "${CMAKE_BINARY_DIR}/${REL_DIR}")
+		file(COPY "${FILE_PATH}" DESTINATION "${CMAKE_BINARY_DIR}/${REL_DIR}")
+		file(APPEND ${QRC_FILE} "    <file>${REL_PATH}</file>\n")
 	endforeach()
 	foreach(FILE_PATH IN LISTS QM_FILENAMES)
 		# Make path relative to project root

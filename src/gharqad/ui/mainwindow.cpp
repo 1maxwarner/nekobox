@@ -1490,6 +1490,24 @@ skip_updater_hide:
         },
         Qt::SingleShotConnection);
 
+    auto *actionGameMod = new QAction(ui->menuRouting_Menu);
+    actionGameMod->setText(QStringLiteral("Game Mod"));
+    ui->menuRouting_Menu->addAction(actionGameMod);
+    connect(
+        actionGameMod, &QAction::triggered, this,
+        [this]() {
+          if (dialog_is_using)
+            return;
+          dialog_is_using = true;
+          auto dialog = new DialogManageRoutes(this, false, true);
+          connect(dialog, &QDialog::finished, this, [=, this] {
+            dialog->deleteLater();
+            dialog_is_using = false;
+          });
+          dialog->show();
+        },
+        Qt::SingleShotConnection);
+
     ui->menuRouting_Menu->addSeparator();
     // ui->menuRouting_Menu->addAction(ui->menu_routing_settings);
 
