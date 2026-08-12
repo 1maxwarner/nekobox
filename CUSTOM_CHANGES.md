@@ -71,5 +71,7 @@ profile is generated.
 
 ## Core
 
-The core is pinned to the public `qr243vbi/sing-box v1.13.15-mod1`, which
-contains the XHTTP implementation used by this build.
+The core is pinned to the private `1maxwarner/nekobox-sing-box-core` revision
+`3a08845631e4`, which preserves the XHTTP/Reality compatibility required by
+the supported share links. GitHub Actions receives read-only access through a
+repository-scoped deploy key.

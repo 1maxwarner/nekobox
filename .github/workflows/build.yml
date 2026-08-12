@@ -131,6 +131,7 @@ jobs:
       - get-tag-and-changelog
     env:
       INPUT_VERSION: ${{ needs.get-tag-and-changelog.outputs.tag }}
+      GOPRIVATE: github.com/1maxwarner/nekobox-sing-box-core
     strategy:
       matrix:
         include:
@@ -165,6 +166,19 @@ jobs:
         with:
           path: ./deployment
           key: CommonCache-${{ matrix.cross_os }}-${{ matrix.cross_arch }}-${{ hashFiles('script/build_go.sh', 'core/**') }}-${{ matrix.go_version }}
+      - name: Configure read-only access to the private core
+        if: ( matrix.cross_os == 'public' || ( github.event.inputs.source_only != 'true' && matrix.allow == 'true' ) ) && steps.cache-common.outputs.cache-hit != 'true'
+        shell: bash
+        env:
+          CORE_REPO_DEPLOY_KEY: ${{ secrets.CORE_REPO_DEPLOY_KEY }}
+        run: |
+          set -euo pipefail
+          test -n "${CORE_REPO_DEPLOY_KEY}"
+          install -d -m 700 "${HOME}/.ssh"
+          printf '%s\n' "${CORE_REPO_DEPLOY_KEY}" > "${HOME}/.ssh/id_ed25519"
+          chmod 600 "${HOME}/.ssh/id_ed25519"
+          ssh-keyscan -t ed25519 github.com >> "${HOME}/.ssh/known_hosts"
+          git config --global url."git@github.com:1maxwarner/nekobox-sing-box-core".insteadOf "https://github.com/1maxwarner/nekobox-sing-box-core"
       - name: Install Golang
         if: ( matrix.cross_os == 'public' || ( github.event.inputs.source_only  != 'true' && matrix.allow == 'true' ) ) && steps.cache-common.outputs.cache-hit != 'true'
         uses: actions/setup-go@main

@@ -7,14 +7,24 @@ ARG BUILDPLATFORM
 RUN echo "FINE"
 RUN echo "I am running on $BUILDPLATFORM, building for $TARGETPLATFORM"
 
-# Update system and install dependencies
-RUN xbps-install -Syu -y
-RUN xbps-install -y bash
-RUN xbps-install -y cmake git ninja jq curl ccache wget sed util-linux coreutils shadow squashfs-tools
-RUN xbps-install -y qt6-base-devel thrift-devel openssl-devel boost-devel lmdb-devel acl-devel libunistring-devel libcurl-devel libzstd-devel patchelf
-RUN xbps-install -y pkg-config qt6-base qt6-tools go thrift base-devel
-RUN xbps-install -y tar xz which file
-RUN xbps-install -y yaml-cpp-devel leveldb-devel
+# Update and install in one retried transaction. Void mirrors can briefly return
+# 404 while per-architecture repository indexes are being synchronized.
+RUN set -eux; \
+    installed=0; \
+    for repository in \
+      https://repo-fastly.voidlinux.org/current \
+      https://repo-default.voidlinux.org/current; do \
+      printf 'repository=%s\n' "$repository" > /etc/xbps.d/00-repository-main.conf; \
+      if xbps-install -Syu -y \
+        bash cmake git ninja jq curl ccache wget sed util-linux coreutils shadow squashfs-tools \
+        qt6-base-devel thrift-devel openssl-devel boost-devel lmdb-devel acl-devel libunistring-devel \
+        libcurl-devel libzstd-devel patchelf pkg-config qt6-base qt6-tools go thrift base-devel \
+        tar xz which file yaml-cpp-devel leveldb-devel; then \
+        installed=1; \
+        break; \
+      fi; \
+    done; \
+    test "$installed" = 1
 
 WORKDIR /app
 
