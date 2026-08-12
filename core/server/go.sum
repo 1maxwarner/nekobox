@@ -54,8 +54,6 @@ github.com/ebitengine/purego v0.10.0 h1:QIw4xfpWT6GWTzaW5XEKy3HXoqrJGx1ijYHzTF0/
 github.com/ebitengine/purego v0.10.0/go.mod h1:iIjxzd6CiRiOG0UyXP+V1+jWqUXVjPKLAI0mRfJZTmQ=
 github.com/enfein/mieru/v3 v3.30.0 h1:g7v0TuK7y0ZMn6TOdjOs8WEUQk8bvs6WYPBJ16SKdBU=
 github.com/enfein/mieru/v3 v3.30.0/go.mod h1:zJBUCsi5rxyvHM8fjFf+GLaEl4OEjjBXr1s5F6Qd3hM=
-github.com/fabbiodev/nekobox-sing-box-core v0.0.0-20260731074051-3a08845631e4 h1:4OZKvGU9UAZoBoadia7gFKDRrh3C03gO/IXzXeKFZk8=
-github.com/fabbiodev/nekobox-sing-box-core v0.0.0-20260731074051-3a08845631e4/go.mod h1:BK9sAQhTOnYPiO7+Feek2t7W0BgN3GAhuGSizVcLC/M=
 github.com/florianl/go-nfqueue/v2 v2.0.2 h1:FL5lQTeetgpCvac1TRwSfgaXUn0YSO7WzGvWNIp3JPE=
 github.com/florianl/go-nfqueue/v2 v2.0.2/go.mod h1:VA09+iPOT43OMoCKNfXHyzujQUty2xmzyCRkBOlmabc=
 github.com/fsnotify/fsnotify v1.9.0 h1:2Ml+OJNzbYCTzsxtv8vKSFD9PbJjmhYF14k/jKC7S9k=
@@ -169,6 +167,8 @@ github.com/prometheus-community/pro-bing v0.4.0 h1:YMbv+i08gQz97OZZBwLyvmmQEEzyf
 github.com/prometheus-community/pro-bing v0.4.0/go.mod h1:b7wRYZtCcPmt4Sz319BykUU241rWLe1VFXyiyWK/dH4=
 github.com/qr243vbi/cmdescape v0.0.0-20260403201713-ba83a3d191f9 h1:dndt3WAPKpr3m7yA6IOmOXVX4XIUvyixELQW5tBTkM4=
 github.com/qr243vbi/cmdescape v0.0.0-20260403201713-ba83a3d191f9/go.mod h1:xBrewWRKDk9jPLnQfQXLI+v11v5juBRRhXMhKfj2jfc=
+github.com/qr243vbi/sing-box v1.13.15-mod1 h1:RWQNtRbID2saZm6rs44gNRfRbvxsTiD1romzf0058ao=
+github.com/qr243vbi/sing-box v1.13.15-mod1/go.mod h1:BK9sAQhTOnYPiO7+Feek2t7W0BgN3GAhuGSizVcLC/M=
 github.com/qr243vbi/sing-tun v0.8.11-mod3 h1:HahU0fbzmigoH5G+HAKLu+YtsKxoRFXYhlaadx+4VEQ=
 github.com/qr243vbi/sing-tun v0.8.11-mod3/go.mod h1:QvarqUtHfj1ULaRR+6kZOS/OoCE+pYGq67A5tyIy+dQ=
 github.com/quic-go/qpack v0.6.0 h1:g7W+BMYynC1LbYLSqRt8PBg5Tgwxn214ZZR34VIOjz8=
