@@ -104,8 +104,7 @@ QJsonArray BuildRules(const QStringList &enabledServiceIds,
     const QSet<QString> enabled(enabledServiceIds.cbegin(),
                                 enabledServiceIds.cend());
     const auto root = LoadCatalog(error);
-    QJsonArray existingRules;
-    QJsonArray supplementalRules;
+    QJsonArray result;
     for (const auto &value : root.value(QStringLiteral("services")).toArray()) {
         const auto service = value.toObject();
         if (!enabled.contains(service.value(QStringLiteral("id")).toString()))
@@ -113,20 +112,16 @@ QJsonArray BuildRules(const QStringList &enabledServiceIds,
         const auto serviceId = service.value(QStringLiteral("id")).toString();
         for (const auto &ruleValue : service.value(QStringLiteral("rules")).toArray()) {
             auto rule = ruleValue.toObject();
-            const bool supplemental =
-                rule.take(QStringLiteral("catalog_source")).toString() ==
-                QStringLiteral("opencck");
+            rule.remove(QStringLiteral("catalog_source"));
             if (rule.value(QStringLiteral("outbound")).toString() == QStringLiteral("proxy")) {
                 const auto outbound = serviceOutbounds.value(serviceId);
                 if (!outbound.isEmpty())
                     rule.insert(QStringLiteral("outbound"), outbound);
             }
-            (supplemental ? supplementalRules : existingRules).append(rule);
+            result.append(rule);
         }
     }
-    for (const auto &rule : supplementalRules)
-        existingRules.append(rule);
-    return existingRules;
+    return result;
 }
 
 QString CategoryDisplayName(const QString &category) {

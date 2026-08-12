@@ -2156,6 +2156,7 @@ Are you sure?</source>
         <source>All categories</source>
         <translation>Все категории</translation>
     </message>
+    <message><source>Categories</source><translation>Категории</translation></message>
     <message>
         <source>Enable shown</source>
         <translation>Включить показанные</translation>
@@ -2210,6 +2211,11 @@ Domains: %2</source>
         <source>No services enabled</source>
         <translation>Нет включённых сервисов</translation>
     </message>
+    <message><source>No active configuration</source><translation>Нет активной конфигурации</translation></message>
+    <message><source>Ping</source><translation>Пинг</translation></message>
+    <message><source>Test this server now</source><translation>Проверить этот сервер сейчас</translation></message>
+    <message><source>Testing…</source><translation>Проверка…</translation></message>
+    <message><source>Remove from enabled services</source><translation>Убрать из включённых сервисов</translation></message>
     <message>
         <source>Ping unavailable</source>
         <translation>пинг недоступен</translation>

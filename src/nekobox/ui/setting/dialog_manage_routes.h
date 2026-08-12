@@ -21,8 +21,8 @@ class QLabel;
 class QComboBox;
 class QLineEdit;
 class QListWidget;
+class QListWidgetItem;
 class QPushButton;
-class QTreeWidget;
 
 extern QVariantMap ruleSetMap;
 
@@ -91,14 +91,15 @@ private:
 
     AutoCompleteTextEdit* rule_editor;
     QLineEdit *gameModSearch = nullptr;
-    QTreeWidget *gameModServices = nullptr;
+    QListWidget *gameModServices = nullptr;
     QListWidget *gameModEnabledServices = nullptr;
-    QComboBox *gameModCategory = nullptr;
+    QListWidget *gameModCategory = nullptr;
     QLabel *gameModSummary = nullptr;
     QPushButton *gameModSelectVisible = nullptr;
     QPushButton *gameModClearVisible = nullptr;
     QWidget *gameModTab = nullptr;
     QHash<QString, int> gameModProfileAssignments;
+    QList<QPair<int, QString>> gameModProfileChoices;
 public slots:
     void accept() override;
 

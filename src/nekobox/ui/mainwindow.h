@@ -136,6 +136,10 @@ class MainWindow : public QMainWindow {
     Q_OBJECT
 
 public: 
+    bool testProfileLatency(
+        const std::shared_ptr<Configs::ProxyEntity> &entity,
+        const std::function<void(const QList<int>&)> &finish = nullptr);
+
 #ifndef SKIP_JS_UPDATER
     JsUpdaterWindow* createJsUpdaterWindow();
 #endif
@@ -468,10 +472,10 @@ private:
 
     static void setup_rpc();
 
-    void urltest_profile(std::shared_ptr<Configs::ProxyEntity> entity, 
+    bool urltest_profile(std::shared_ptr<Configs::ProxyEntity> entity,
         bool skip_last_url_test_warning = false, const std::function<void(const QList<int>&)> &finish = nullptr);
 
-    void urltest_current_group(const QList<int>& profiles, 
+    bool urltest_current_group(const QList<int>& profiles,
         bool skip_last_url_test_warning = false, const std::function<void(const QList<int>&)> &finish = nullptr);
 
     void stopTests();

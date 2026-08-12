@@ -179,15 +179,23 @@ void MainWindow::runURLTest(const QString& config, bool useDefault, const QStrin
     }
 }
 
-void MainWindow::urltest_profile(std::shared_ptr<Configs::ProxyEntity> entity,  
+bool MainWindow::urltest_profile(std::shared_ptr<Configs::ProxyEntity> entity,
         bool skip_last_url_test_warning, const std::function<void(const QList<int>&)> &finish){
-    urltest_current_group({entity->Id()}, skip_last_url_test_warning, finish);
+    return urltest_current_group({entity->Id()}, skip_last_url_test_warning, finish);
 }
 
-void MainWindow::urltest_current_group(const QList<int>& profiles,  
+bool MainWindow::testProfileLatency(
+    const std::shared_ptr<Configs::ProxyEntity> &entity,
+    const std::function<void(const QList<int>&)> &finish) {
+    if (entity != nullptr)
+        return urltest_profile(entity, true, finish);
+    return false;
+}
+
+bool MainWindow::urltest_current_group(const QList<int>& profiles,
         bool skip_last_url_test_warning, const std::function<void(const QList<int>&)> &finish) {
     if (profiles.isEmpty()) {
-        return;
+        return false;
     }
     if (!speedtestRunning.tryLock()) {
         if (!skip_last_url_test_warning){
@@ -195,7 +203,7 @@ void MainWindow::urltest_current_group(const QList<int>& profiles,
                 QMessageBox::warning(this, software_name, tr("The last url test did not exit completely, please wait. If it persists, please restart the program."));
             });
         }
-        return;
+        return false;
     }
 
     runOnNewThread([this, profiles_ids = profiles, finish]() {
@@ -206,6 +214,8 @@ void MainWindow::urltest_current_group(const QList<int>& profiles,
             if (!buildObject->error.isEmpty()) {
                 MW_show_log(tr("Failed to build test config: ") + buildObject->error);
                 speedtestRunning.unlock();
+                if (finish != nullptr)
+                    finish({});
                 return;
             }
 
@@ -284,6 +294,7 @@ void MainWindow::urltest_current_group(const QList<int>& profiles,
             finish(profiles_ids);
         }
     });
+    return true;
 }
 
 void MainWindow::stopTests() {

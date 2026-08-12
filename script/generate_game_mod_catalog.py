@@ -468,6 +468,40 @@ def build(
             }
         )
 
+    # A compact launcher-only route requested for League of Legends. Keep the
+    # executable names as search metadata; the actual match intentionally uses
+    # only the supplied network so launcher updates are covered as well.
+    services.append(
+        {
+            "id": "manual:league-launcher",
+            "name": "League Launcher",
+            "icon": [],
+            "keywords": [
+                "LeagueClient.exe",
+                "LeagueClientUx.exe",
+                "RiotClientServices.exe",
+                "RiotClientUx.exe",
+            ],
+            "aliases": [
+                "league launcher",
+                "league of legends launcher",
+                "lol launcher",
+                "riot launcher",
+            ],
+            "category": "games",
+            "source": "manual",
+            "direct_rule_count": 0,
+            "proxy_rule_count": 1,
+            "rules": [
+                {
+                    "action": "route",
+                    "outbound": "proxy",
+                    "ip_cidr": ["3.64.0.0/12"],
+                }
+            ],
+        }
+    )
+
     portal_categories = load_portal_categories(opencck_config_root)
     service_match: dict[str, dict[str, Any]] = {}
     domain_owner: dict[str, dict[str, Any]] = {}
@@ -532,14 +566,13 @@ def build(
     for service in services:
         domains = collapse_domains(service.pop("_domains", []))
         if domains:
-            # Existing ExitLag rules stay first and therefore win duplicate
-            # matches; OpenCCK supplies a domain-only fallback afterwards.
+            # OpenCCK rules are ordinary service rules. Stable and beta inputs
+            # are merged into the same domain set with no separate priority.
             service["rules"].append(
                 {
                     "action": "route",
                     "outbound": "proxy",
                     "domain_suffix": domains,
-                    "catalog_source": "opencck",
                 }
             )
             service["proxy_rule_count"] = sum(
