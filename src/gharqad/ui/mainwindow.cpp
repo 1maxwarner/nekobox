@@ -1491,7 +1491,7 @@ skip_updater_hide:
         Qt::SingleShotConnection);
 
     auto *actionGameMod = new QAction(ui->menuRouting_Menu);
-    actionGameMod->setText(QStringLiteral("Game Mod"));
+    actionGameMod->setText(tr("Game Mod"));
     ui->menuRouting_Menu->addAction(actionGameMod);
     connect(
         actionGameMod, &QAction::triggered, this,

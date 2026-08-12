@@ -79,6 +79,9 @@ namespace Configs {
 
         // Services selected in the visual Game Mod routing catalog.
         QStringList game_mod_enabled_services = {};
+        // JSON object: service id -> proxy profile id. Missing/-1 inherits the
+        // currently active configuration.
+        QString game_mod_service_profiles = "{}";
 
         std::shared_ptr<TunSplit> tun_split = std::make_shared<TunSplit>();
 

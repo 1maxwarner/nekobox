@@ -16,6 +16,8 @@
 #include <QDir>
 #include <QFile>
 #include <QFileInfo>
+#include <QHash>
+#include <QJsonDocument>
 #include <QStandardPaths>
 
 #ifdef _WIN32
@@ -942,11 +944,80 @@ static void AppendMissingRuleSet(QJsonObject &route, const QJsonObject &ruleSet)
   route["rule_set"] = ruleSets;
 }
 
-static QJsonArray PrependGameModRules(const QJsonArray &routeRules) {
-  auto result =
-      GameMod::BuildRules(dataStore->routing->game_mod_enabled_services);
-  for (const auto &rule : routeRules)
+static QHash<QString, int> GameModProfileAssignments() {
+  QHash<QString, int> result;
+  const auto object = QJsonDocument::fromJson(
+                          dataStore->routing->game_mod_service_profiles.toUtf8())
+                          .object();
+  for (auto it = object.cbegin(); it != object.cend(); ++it) {
+    if (it.value().isDouble())
+      result.insert(it.key(), it.value().toInt(-1));
+  }
+  return result;
+}
+
+static QHash<QString, QString> BuildGameModOutbounds(
+    const std::shared_ptr<BuildConfigStatus> &status,
+    std::map<int, QString> &outboundMap,
+    QJsonArray *directDomains = nullptr,
+    bool *needDirectDnsRules = nullptr) {
+  QHash<QString, QString> result;
+  const auto assignments = GameModProfileAssignments();
+  for (const auto &serviceId : dataStore->routing->game_mod_enabled_services) {
+    const auto profileId = assignments.value(serviceId, -1);
+    if (profileId < 0)
+      continue;
+    if (status->ent != nullptr && profileId == status->ent->id) {
+      result.insert(serviceId, QStringLiteral("proxy"));
+      continue;
+    }
+    if (!outboundMap.contains(profileId)) {
+      const auto profile = profileManager->GetProfile(profileId);
+      if (profile == nullptr)
+        continue; // A deleted assignment safely falls back to the active proxy.
+      const auto chain = resolveChain(profile);
+      if (!status->result->error.isEmpty())
+        return {};
+      const auto tag =
+          BuildChainInternal(status->chainID, chain, status, status->routeID);
+      status->routeID++;
+      outboundMap[profileId] = tag;
+      if (directDomains != nullptr &&
+          !IsIpAddress(profile->serverAddress)) {
+        directDomains->append(profile->serverAddress);
+        if (needDirectDnsRules != nullptr)
+          *needDirectDnsRules = true;
+      }
+    }
+    result.insert(serviceId, outboundMap[profileId]);
+  }
+  return result;
+}
+
+static QJsonArray PrependGameModRules(
+    const QJsonArray &routeRules,
+    const QHash<QString, QString> &serviceOutbounds = {}) {
+  const auto gameModRules = GameMod::BuildRules(
+      dataStore->routing->game_mod_enabled_services, serviceOutbounds);
+  QJsonArray result;
+  int firstRouteRule = 0;
+  // Domain-based service rules need sniff/resolve actions to run first,
+  // especially in TUN mode. Preserve those infrastructure actions at the
+  // front, then place Game Mod before the user's ordinary routing rules.
+  for (; firstRouteRule < routeRules.size(); ++firstRouteRule) {
+    const auto action =
+        routeRules[firstRouteRule].toObject()[QStringLiteral("action")]
+            .toString();
+    if (action != QStringLiteral("sniff") &&
+        action != QStringLiteral("resolve") &&
+        action != QStringLiteral("hijack-dns"))
+      break;
+    result.append(routeRules[firstRouteRule]);
+  }
+  for (const auto &rule : gameModRules)
     result.append(rule);
+  for (; firstRouteRule < routeRules.size(); ++firstRouteRule)
+    result.append(routeRules[firstRouteRule]);
   return result;
 }
 
@@ -985,6 +1056,11 @@ static QJsonArray BuildNekoboxTunRulesForFullConfig(
     outboundMap[item] = tag;
   }
 
+  const auto gameModOutbounds =
+      BuildGameModOutbounds(status, outboundMap);
+  if (!status->result->error.isEmpty())
+    return {};
+
   auto extraOutbounds = config["outbounds"].toArray();
   for (const auto &outbound : status->outbounds) {
     extraOutbounds += outbound;
@@ -1009,7 +1085,8 @@ static QJsonArray BuildNekoboxTunRulesForFullConfig(
   config["route"] = route;
 
   auto routeRules = PrependGameModRules(
-      routeChain->get_route_rules(false, false, outboundMap));
+      routeChain->get_route_rules(false, false, outboundMap),
+      gameModOutbounds);
   auto split = dataStore->routing->tun_split;
   if (!split->proxy.isEmpty()) {
     routeRules += QJsonObject{{"action", "route"},
@@ -1535,8 +1612,14 @@ skip_multiple_jobs:
       }
     }
 
+    const auto gameModOutbounds = BuildGameModOutbounds(
+        status, outboundMap, &directDomains, &needDirectDnsRules);
+    if (!status->result->error.isEmpty())
+      return;
+
     auto routeRules = PrependGameModRules(
-        routeChain->get_route_rules(false, false, outboundMap));
+        routeChain->get_route_rules(false, false, outboundMap),
+        gameModOutbounds);
 
     // tun process routing
     if (dataStore->spmode_vpn && !status->forTest) {

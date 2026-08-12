@@ -1,0 +1,6 @@
+- feat: redesign Game Mod with categories, smart search, enabled-services panel, and per-service configurations
+- feat: merge OpenCCK stable and beta website lists while preserving existing routing priority for duplicates
+- feat: show the active server flag or name and its ping in a compact service status
+- fix: restore unlinked executable profiles such as Counter-Strike 2 and expand search across aliases, domains, and executable names
+- fix: add full YouTube domain coverage and keep sniff/resolve rules ahead of Game Mod routing
+- i18n: make the complete Game Mod interface translatable and add Russian translations

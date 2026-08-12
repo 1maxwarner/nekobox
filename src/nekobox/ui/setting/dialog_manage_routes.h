@@ -5,6 +5,7 @@
 #pragma once
 
 #include <QDialog>
+#include <QHash>
 #include <QMutex>
 #include <QMenu>
 
@@ -17,9 +18,11 @@
 #include <string>
 
 class QLabel;
+class QComboBox;
 class QLineEdit;
 class QListWidget;
 class QPushButton;
+class QTreeWidget;
 
 extern QVariantMap ruleSetMap;
 
@@ -71,6 +74,7 @@ private:
     void filterGameModServices(const QString &query);
     void updateGameModSummary();
     void setVisibleGameModServicesChecked(bool checked);
+    void refreshGameModEnabledServices();
 
     QList<std::shared_ptr<Configs::RoutingChain>> chainList;
 
@@ -87,11 +91,14 @@ private:
 
     AutoCompleteTextEdit* rule_editor;
     QLineEdit *gameModSearch = nullptr;
-    QListWidget *gameModServices = nullptr;
+    QTreeWidget *gameModServices = nullptr;
+    QListWidget *gameModEnabledServices = nullptr;
+    QComboBox *gameModCategory = nullptr;
     QLabel *gameModSummary = nullptr;
     QPushButton *gameModSelectVisible = nullptr;
     QPushButton *gameModClearVisible = nullptr;
     QWidget *gameModTab = nullptr;
+    QHash<QString, int> gameModProfileAssignments;
 public slots:
     void accept() override;
 

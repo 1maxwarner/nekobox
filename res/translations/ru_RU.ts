@@ -2140,6 +2140,98 @@ Are you sure?</source>
         <source>Local Override</source>
         <translation>Назначить локал. DNS</translation>
     </message>
+    <message>
+        <source>Game Mod</source>
+        <translation>Игровой режим</translation>
+    </message>
+    <message>
+        <source>Choose which games and services should use the proxy. Checked services add their optimized process, domain, address, and port rules before the current routing profile.</source>
+        <translation>Выберите игры и сервисы, которые должны использовать прокси. Для отмеченных сервисов оптимизированные правила процессов, доменов, адресов и портов применяются раньше правил текущего профиля маршрутизации.</translation>
+    </message>
+    <message>
+        <source>Search by service, alias, domain, or executable</source>
+        <translation>Поиск по сервису, псевдониму, домену или исполняемому файлу</translation>
+    </message>
+    <message>
+        <source>All categories</source>
+        <translation>Все категории</translation>
+    </message>
+    <message>
+        <source>Enable shown</source>
+        <translation>Включить показанные</translation>
+    </message>
+    <message>
+        <source>Disable shown</source>
+        <translation>Выключить показанные</translation>
+    </message>
+    <message>
+        <source>Service</source>
+        <translation>Сервис</translation>
+    </message>
+    <message>
+        <source>Category</source>
+        <translation>Категория</translation>
+    </message>
+    <message>
+        <source>Configuration</source>
+        <translation>Конфигурация</translation>
+    </message>
+    <message>
+        <source>Enabled now</source>
+        <translation>Сейчас включено</translation>
+    </message>
+    <message>
+        <source>Selected services and their assigned configurations</source>
+        <translation>Выбранные сервисы и назначенные им конфигурации</translation>
+    </message>
+    <message>
+        <source>%1 rules  ·  %2 domains</source>
+        <translation>Правил: %1  ·  доменов: %2</translation>
+    </message>
+    <message>
+        <source>Current active configuration</source>
+        <translation>Текущая активная конфигурация</translation>
+    </message>
+    <message>
+        <source>Executables: %1
+Domains: %2</source>
+        <translation>Исполняемые файлы: %1
+Домены: %2</translation>
+    </message>
+    <message>
+        <source>No Game Mod services found</source>
+        <translation>Сервисы для игрового режима не найдены</translation>
+    </message>
+    <message>
+        <source>%1 enabled  |  %2 shown of %3 services</source>
+        <translation>Включено: %1  |  показано: %2 из %3</translation>
+    </message>
+    <message>
+        <source>No services enabled</source>
+        <translation>Нет включённых сервисов</translation>
+    </message>
+    <message>
+        <source>Ping unavailable</source>
+        <translation>пинг недоступен</translation>
+    </message>
+</context>
+<context>
+    <name>GameMod</name>
+    <message><source>Games</source><translation>Игры</translation></message>
+    <message><source>Streaming and media</source><translation>Видео и мультимедиа</translation></message>
+    <message><source>Messaging</source><translation>Мессенджеры</translation></message>
+    <message><source>Social networks</source><translation>Социальные сети</translation></message>
+    <message><source>AI services</source><translation>ИИ-сервисы</translation></message>
+    <message><source>Education</source><translation>Образование</translation></message>
+    <message><source>Finance</source><translation>Финансы</translation></message>
+    <message><source>Shopping</source><translation>Покупки</translation></message>
+    <message><source>Creative tools</source><translation>Творческие инструменты</translation></message>
+    <message><source>News</source><translation>Новости</translation></message>
+    <message><source>Tools and platforms</source><translation>Инструменты и платформы</translation></message>
+    <message><source>Other</source><translation>Другое</translation></message>
+    <message><source>Game Mod catalog is not available</source><translation>Каталог игрового режима недоступен</translation></message>
+    <message><source>Game Mod catalog is invalid: %1</source><translation>Каталог игрового режима повреждён: %1</translation></message>
+    <message><source>Game Mod icon atlas is not available</source><translation>Набор значков игрового режима недоступен</translation></message>
 </context>
 <context>
     <name>DialogVPNSettings</name>
@@ -3400,6 +3492,10 @@ https://matsuridayo.github.io/n-configuration/#vpn-tun</translation>
 </context>
 <context>
     <name>MainWindow</name>
+    <message>
+        <source>Game Mod</source>
+        <translation>Игровой режим</translation>
+    </message>
     <message>
         <location filename="../../src/nekobox/ui/mainwindow.ui" line="675" />
         <source>Program</source>
