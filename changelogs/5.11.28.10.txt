@@ -1,0 +1,3 @@
+- build: make Linux AppImage dependency downloads resilient to transient TLS and network failures
+- build: download and cache the AppImage runtime before entering the Linux build container
+- ci: propagate Linux container failures and upload only completed release files

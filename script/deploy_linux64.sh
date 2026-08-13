@@ -6,6 +6,36 @@ nekobox=$EXECUTABLE_NAME
 
 set -e
 
+download_file() {
+  local output="$1"
+  local url="$2"
+  local temporary="${output}.part"
+  local attempt
+
+  rm -f "$temporary"
+  for attempt in 1 2 3 4 5
+  do
+    if curl --fail --location \
+      --connect-timeout 30 \
+      --retry 3 \
+      --retry-delay 3 \
+      --retry-all-errors \
+      --output "$temporary" \
+      "$url" && [[ -s "$temporary" ]]
+    then
+      mv -f "$temporary" "$output"
+      return 0
+    fi
+
+    rm -f "$temporary"
+    echo "Download attempt ${attempt}/5 failed: ${url}" >&2
+    sleep $((attempt * 3))
+  done
+
+  echo "Failed to download after 5 attempts: ${url}" >&2
+  return 1
+}
+
 UNAME="${UNAME:-$(uname -m)}"
 
 if [[ "${UNAME}" == 'aarch64' || "${UNAME}" == 'arm64' ]]; then
@@ -48,7 +78,7 @@ pushd "$SRC_ROOT"
 #### copy srslist ####
 if [[ ! -f srslist.json ]]
 then
-wget -O srslist.json "https://github.com/qr243vbi/ruleset/raw/refs/heads/rule-set/srslist.json"
+download_file srslist.json "https://github.com/qr243vbi/ruleset/raw/refs/heads/rule-set/srslist.json"
 fi
 cp srslist.json "$DEST/srslist.json"
 
@@ -60,7 +90,8 @@ then
 
 if [[ ! -f "libcronet-linux-${ARCH}.so" ]]
 then
-wget -O "libcronet-linux-${ARCH}.so" "https://github.com/SagerNet/cronet-go/releases/download/$(wget -q -O - https://api.github.com/repos/SagerNet/cronet-go/releases/latest | jq -r .tag_name)/libcronet-linux-${ARCH}.so"
+CRONET_VERSION="$(curl --fail --location --retry 5 --retry-all-errors --silent https://api.github.com/repos/SagerNet/cronet-go/releases/latest | jq -r .tag_name)"
+download_file "libcronet-linux-${ARCH}.so" "https://github.com/SagerNet/cronet-go/releases/download/${CRONET_VERSION}/libcronet-linux-${ARCH}.so"
 fi
 cp "libcronet-linux-${ARCH}.so"  "$DEST/libcronet.so"
 
@@ -82,14 +113,14 @@ then
 #  APPIMAGE_EXTRA_ARGS=()
 fi
 ## else
-  [[ -f runtime-${ARCH1} ]]  || wget -O "runtime-${ARCH1}" https://github.com/AppImage/type2-runtime/releases/download/continuous/runtime-${ARCH1}
+  [[ -s runtime-${ARCH1} ]] || download_file "runtime-${ARCH1}" "https://github.com/AppImage/type2-runtime/releases/download/continuous/runtime-${ARCH1}"
   APPIMAGE_EXTRA_ARGS=(--runtime-file "$CURDIR/runtime-${ARCH1}")
 #fi
 
 
-[[ -f linuxdeploy-$ARCH2.AppImage ]]            || wget -O linuxdeploy-$ARCH2.AppImage              https://github.com/linuxdeploy/linuxdeploy/releases/download/continuous/linuxdeploy-$ARCH2.AppImage
-[[ -f linuxdeploy-plugin-qt-$ARCH2.AppImage ]]  || wget -O linuxdeploy-plugin-qt-$ARCH2.AppImage    https://github.com/linuxdeploy/linuxdeploy-plugin-qt/releases/download/continuous/linuxdeploy-plugin-qt-$ARCH2.AppImage
-[[ -f appimagetool-${ARCH1}.AppImage ]]         || wget -O appimagetool-$ARCH1.AppImage             https://github.com/AppImage/appimagetool/releases/download/continuous/appimagetool-${ARCH1}.AppImage
+[[ -s linuxdeploy-$ARCH2.AppImage ]] || download_file "linuxdeploy-$ARCH2.AppImage" "https://github.com/linuxdeploy/linuxdeploy/releases/download/continuous/linuxdeploy-$ARCH2.AppImage"
+[[ -s linuxdeploy-plugin-qt-$ARCH2.AppImage ]] || download_file "linuxdeploy-plugin-qt-$ARCH2.AppImage" "https://github.com/linuxdeploy/linuxdeploy-plugin-qt/releases/download/continuous/linuxdeploy-plugin-qt-$ARCH2.AppImage"
+[[ -s appimagetool-${ARCH1}.AppImage ]] || download_file "appimagetool-${ARCH1}.AppImage" "https://github.com/AppImage/appimagetool/releases/download/continuous/appimagetool-${ARCH1}.AppImage"
 chmod +x *.AppImage ||:
 
 export EXTRA_QT_PLUGINS="iconengines;wayland-shell-integration;wayland-decoration-client;"
