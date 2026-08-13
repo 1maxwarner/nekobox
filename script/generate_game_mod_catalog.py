@@ -349,6 +349,19 @@ def generic_icon(name: str) -> Image.Image:
     return tile
 
 
+def normalized_icon(original: Image.Image) -> Image.Image:
+    """Trim transparent padding and fit every logo into the same 40px box."""
+    icon = original.convert("RGBA")
+    bounds = icon.getchannel("A").getbbox()
+    if bounds is not None:
+        icon = icon.crop(bounds)
+    return ImageOps.contain(
+        icon,
+        (ICON_SIZE - 8, ICON_SIZE - 8),
+        Image.Resampling.LANCZOS,
+    )
+
+
 def opencck_icon(
     icon_root: Path | None, portal_names: list[str], display_name: str
 ) -> Image.Image:
@@ -365,11 +378,7 @@ def opencck_icon(
                 continue
             try:
                 with Image.open(path) as original:
-                    icon = ImageOps.contain(
-                        original.convert("RGBA"),
-                        (ICON_SIZE - 8, ICON_SIZE - 8),
-                        Image.Resampling.LANCZOS,
-                    )
+                    icon = normalized_icon(original)
                 tile = Image.new("RGBA", (ICON_SIZE, ICON_SIZE), (0, 0, 0, 0))
                 tile.alpha_composite(
                     icon, ((ICON_SIZE - icon.width) // 2, (ICON_SIZE - icon.height) // 2)
@@ -620,7 +629,7 @@ def build(
         atlas_index = len(services)
         icon_path = source / application["icon_file"]
         with Image.open(icon_path) as original:
-            icon = ImageOps.contain(original.convert("RGBA"), (ICON_SIZE - 8, ICON_SIZE - 8), Image.Resampling.LANCZOS)
+            icon = normalized_icon(original)
         tile = Image.new("RGBA", (ICON_SIZE, ICON_SIZE), (0, 0, 0, 0))
         tile.alpha_composite(icon, ((ICON_SIZE - icon.width) // 2, (ICON_SIZE - icon.height) // 2))
         column = atlas_index % ATLAS_COLUMNS

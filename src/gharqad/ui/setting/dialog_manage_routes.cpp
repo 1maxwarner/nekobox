@@ -18,6 +18,7 @@
 #include <QLineEdit>
 #include <QListView>
 #include <QListWidget>
+#include <QMouseEvent>
 #include <QPainter>
 #include <QPersistentModelIndex>
 #include <QPointer>
@@ -28,6 +29,8 @@
 #include <QSortFilterProxyModel>
 #include <QSplitter>
 #include <QStyle>
+#include <QStyleOptionButton>
+#include <QStyledItemDelegate>
 #include <QTabWidget>
 #include <QToolButton>
 #include <QVBoxLayout>
@@ -444,6 +447,86 @@ private:
     QStringList queryTokens;
 };
 
+class GameModServiceDelegate final : public QStyledItemDelegate {
+public:
+    explicit GameModServiceDelegate(QObject *parent)
+        : QStyledItemDelegate(parent) {}
+
+    void paint(QPainter *painter, const QStyleOptionViewItem &option,
+               const QModelIndex &index) const override {
+        painter->save();
+        painter->setRenderHint(QPainter::Antialiasing);
+
+        const auto card = option.rect.adjusted(3, 3, -3, -3);
+        if (option.state & QStyle::State_MouseOver) {
+            painter->setPen(Qt::NoPen);
+            painter->setBrush(option.palette.alternateBase());
+            painter->drawRoundedRect(card, 8, 8);
+        }
+
+        constexpr int iconSize = 48;
+        const QRect iconRect(card.center().x() - iconSize / 2,
+                             card.top() + 9, iconSize, iconSize);
+        const auto icon = qvariant_cast<QIcon>(index.data(Qt::DecorationRole));
+        icon.paint(painter, iconRect, Qt::AlignCenter, QIcon::Normal,
+                   QIcon::On);
+
+        const QRect textRect(card.left() + 8, iconRect.bottom() + 7,
+                             card.width() - 16, 24);
+        const auto text = option.fontMetrics.elidedText(
+            index.data(Qt::DisplayRole).toString(), Qt::ElideRight,
+            textRect.width());
+        painter->setPen(option.palette.color(QPalette::Text));
+        painter->drawText(textRect, Qt::AlignHCenter | Qt::AlignTop, text);
+
+        QStyleOptionButton checkOption;
+        checkOption.rect = checkRect(option);
+        checkOption.palette = option.palette;
+        checkOption.direction = option.direction;
+        checkOption.state = QStyle::State_Enabled |
+                            (index.data(Qt::CheckStateRole).toInt() == Qt::Checked
+                                 ? QStyle::State_On
+                                 : QStyle::State_Off);
+        QApplication::style()->drawPrimitive(QStyle::PE_IndicatorCheckBox,
+                                             &checkOption, painter,
+                                             option.widget);
+        painter->restore();
+    }
+
+    bool editorEvent(QEvent *event, QAbstractItemModel *model,
+                     const QStyleOptionViewItem &option,
+                     const QModelIndex &index) override {
+        if (event->type() != QEvent::MouseButtonRelease)
+            return false;
+        const auto *mouseEvent = static_cast<QMouseEvent *>(event);
+        if (mouseEvent->button() != Qt::LeftButton ||
+            !checkHitRect(option).contains(mouseEvent->position().toPoint())) {
+            return false;
+        }
+        const auto nextState =
+            index.data(Qt::CheckStateRole).toInt() == Qt::Checked
+                ? Qt::Unchecked
+                : Qt::Checked;
+        return model->setData(index, nextState, Qt::CheckStateRole);
+    }
+
+    QSize sizeHint(const QStyleOptionViewItem &,
+                   const QModelIndex &) const override {
+        return QSize(166, 106);
+    }
+
+private:
+    static QRect checkRect(const QStyleOptionViewItem &option) {
+        constexpr int indicatorSize = 18;
+        return QRect(option.rect.right() - indicatorSize - 9,
+                     option.rect.top() + 9, indicatorSize, indicatorSize);
+    }
+
+    static QRect checkHitRect(const QStyleOptionViewItem &option) {
+        return checkRect(option).adjusted(-6, -6, 6, 6);
+    }
+};
+
 
 void DialogManageRoutes::reloadProfileItems() {
     if (chainList.empty()) {
@@ -658,10 +741,13 @@ void DialogManageRoutes::setupGameModTab() {
     gameModServices->setWrapping(true);
     gameModServices->setWordWrap(true);
     gameModServices->setSelectionMode(QAbstractItemView::NoSelection);
-    gameModServices->setIconSize(QSize(52, 52));
-    gameModServices->setGridSize(QSize(162, 102));
+    gameModServices->setIconSize(QSize(48, 48));
+    gameModServices->setGridSize(QSize(170, 112));
     gameModServices->setSpacing(6);
     gameModServices->setUniformItemSizes(true);
+    gameModServices->setMouseTracking(true);
+    gameModServices->setItemDelegate(
+        new GameModServiceDelegate(gameModServices));
     gameModServices->setVerticalScrollMode(QAbstractItemView::ScrollPerPixel);
 
     splitter->addWidget(categoryPanel);
@@ -849,17 +935,17 @@ void DialogManageRoutes::refreshGameModEnabledServices() {
         activeToggle->setChecked(serviceEnabled);
         activeToggle->setToolTip(
             tr("Pause routing without removing this saved service"));
-        rowLayout->addWidget(activeToggle);
+        rowLayout->addWidget(activeToggle, 0, Qt::AlignVCenter);
         auto *ping = new QToolButton(rowWidget);
         ping->setText(tr("Ping"));
         ping->setToolTip(tr("Test this server now"));
         ping->setIcon(style()->standardIcon(QStyle::SP_BrowserReload));
-        rowLayout->addWidget(ping);
+        rowLayout->addWidget(ping, 0, Qt::AlignVCenter);
         auto *remove = new QToolButton(rowWidget);
         remove->setIcon(style()->standardIcon(QStyle::SP_TitleBarCloseButton));
         remove->setAutoRaise(true);
         remove->setToolTip(tr("Remove this saved service"));
-        rowLayout->addWidget(remove);
+        rowLayout->addWidget(remove, 0, Qt::AlignVCenter);
         gameModEnabledServices->setItemWidget(item, rowWidget);
 
         connect(profileCombo,

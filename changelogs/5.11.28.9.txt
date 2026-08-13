@@ -1,0 +1,4 @@
+- fix: keep the library checkbox visible and checked after adding a service to Enabled now
+- ui: draw every library checkbox in the same fixed top-right position with native checked and unchecked states
+- ui: normalize transparent icon padding and render every service logo in the same 48px area
+- ui: align active switches, ping actions, and remove buttons consistently across enabled-service cards
