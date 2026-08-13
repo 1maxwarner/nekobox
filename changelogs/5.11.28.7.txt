@@ -1,0 +1,9 @@
+- feat: redesign Game Mod as a larger library with a left category sidebar and a virtualized service grid
+- feat: add a dedicated enabled-services tab with per-service server selection, live ping, and removal controls
+- feat: replace the legacy catalog with exact ExitLag routes and merge OpenCCK stable/beta at equal routing priority
+- feat: combine OpenCCK brand components and ExitLag beta/region variants under one service card while preserving legacy IDs
+- feat: add the League Launcher route using only 3.64.0.0/12
+- fix: restore FACEIT application 2784 and executable profiles such as Counter-Strike 2
+- fix: expand YouTube coverage and keep sniff/resolve rules ahead of Game Mod routing
+- perf: cache the catalog and icon atlas and pre-index smart search data for faster opening, closing, and filtering
+- i18n: translate the complete Game Mod interface and add Russian translations
