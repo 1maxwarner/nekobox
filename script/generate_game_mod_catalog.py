@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+from collections import defaultdict
 import hashlib
 import json
 import math
@@ -28,38 +29,8 @@ PROFILE_ALIASES = {
     "the division 2": {"thedivision2.exe"},
 }
 
-# A small number of ExitLag applications have an icon record but no linked
-# profile in an export. Keep these records in Game Mod when we have a reliable
-# route definition, instead of silently dropping them with the no-rule apps.
-MANUAL_APPLICATION_RULES = {
-    "2784": [
-        {
-            "action": "route",
-            "outbound": "proxy",
-            "process_name": [
-                "FACEIT.exe",
-                "FACEITClient.exe",
-                "FACEITAntiCheat.exe",
-                "FACEITAC.exe",
-            ],
-        },
-        {
-            "action": "route",
-            "outbound": "proxy",
-            "domain_suffix": [
-                "faceit.com",
-                "faceitcdn.com",
-                "faceit-cdn.net",
-            ],
-        },
-    ],
-}
-
-MANUAL_APPLICATION_ALIASES = {
-    "2784": ["FACEIT", "FACEIT client", "FACEIT anti-cheat", "FACEIT AC"],
-}
-
 DISPLAY_NAMES = {
+    "adobe": "Adobe",
     "chatgpt": "ChatGPT",
     "discord": "Discord",
     "facebook": "Facebook",
@@ -104,6 +75,7 @@ GROUP_CATEGORIES = {
 }
 
 BRAND_CATEGORIES = {
+    "adobe": "creative",
     "discord": "messaging",
     "facebook": "social",
     "google": "tools",
@@ -116,6 +88,49 @@ BRAND_CATEGORIES = {
     "twitter": "social",
     "whatsapp": "messaging",
     "youtube": "streaming",
+}
+
+PORTAL_BRAND_ALIASES = {
+    "ea com": "ea",
+    "steamcommunity": "steam",
+    "steampowered": "steam",
+    "steamstatic": "steam",
+}
+
+# These suffixes describe another build, region, or launcher for the same
+# service. When the export contains more than one entry with the same base
+# name, keep one card and combine all exact rules under it.
+APPLICATION_VARIANT_SUFFIXES = {
+    "beta",
+    "br",
+    "brazil",
+    "china",
+    "client",
+    "cn",
+    "eu",
+    "europe",
+    "experimental",
+    "global",
+    "international",
+    "japan",
+    "jp",
+    "kr",
+    "korea",
+    "latam",
+    "launcher",
+    "mobile",
+    "na",
+    "pc",
+    "ru",
+    "russia",
+    "russian",
+    "sea",
+    "taiwan",
+    "test",
+    "testing",
+    "tw",
+    "ua",
+    "vn",
 }
 
 
@@ -148,6 +163,68 @@ def service_aliases(name: str) -> list[str]:
     return unique([value for value in aliases if value])
 
 
+def application_family(name: str) -> str:
+    tokens = normalized(name).split()
+    while len(tokens) > 1 and tokens[-1] in APPLICATION_VARIANT_SUFFIXES:
+        tokens.pop()
+    return " ".join(tokens)
+
+
+def coalesce_application_variants(
+    applications: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    groups: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    for application in applications:
+        groups[application_family(application["name"])].append(application)
+
+    result: list[dict[str, Any]] = []
+    for family, variants in groups.items():
+        # Prefer an unsuffixed entry so existing selections and its artwork
+        # remain stable. Otherwise choose the shortest, then oldest numeric ID.
+        primary = min(
+            variants,
+            key=lambda item: (
+                normalized(item["name"]) != family,
+                len(normalized(item["name"])),
+                int(item["id"]) if str(item["id"]).isdigit() else math.inf,
+            ),
+        )
+        combined = dict(primary)
+        if normalized(primary["name"]) == family and family in DISPLAY_NAMES:
+            combined["name"] = DISPLAY_NAMES.get(family, primary["name"])
+        combined["profile_indexes"] = unique(
+            [
+                profile_index
+                for variant in variants
+                for profile_index in variant["profile_indexes"]
+            ]
+        )
+        all_ids = unique(
+            [
+                str(application_id)
+                for variant in variants
+                for application_id in variant.get("application_ids", [variant["id"]])
+            ]
+        )
+        combined["legacy_ids"] = [
+            application_id
+            for application_id in all_ids
+            if application_id != str(combined["id"])
+        ]
+        combined["variant_names"] = unique(
+            [
+                variant_name
+                for variant in variants
+                for variant_name in variant.get("variant_names", [variant["name"]])
+            ]
+        )
+        combined["variant_names"] = unique(
+            combined["variant_names"] + [family, combined["name"]]
+        )
+        result.append(combined)
+    return result
+
+
 def category_for_service(name: str) -> str:
     value = normalized(name)
     if any(token in value for token in ("youtube", "twitch", "netflix", "spotify", "video", "music")):
@@ -171,7 +248,7 @@ def portal_brand(portal: str) -> str:
     if "@" in value:
         prefix = normalized(value.split("@", 1)[0])
         if prefix:
-            return prefix
+            return PORTAL_BRAND_ALIASES.get(prefix, prefix)
     if "youtube" in value or "youtu.be" in value:
         return "youtube"
     if "twitch" in value:
@@ -183,7 +260,8 @@ def portal_brand(portal: str) -> str:
     if value.endswith(".google") or "google.com" in value or "withgoogle.com" in value:
         return "google"
     stem = value.split(".", 1)[0]
-    return normalized(stem) or normalized(value)
+    brand = normalized(stem) or normalized(value)
+    return PORTAL_BRAND_ALIASES.get(brand, brand)
 
 
 def portal_display_name(portal: str, brand: str) -> str:
@@ -392,9 +470,15 @@ def build(
                 "name": name,
                 "icon_file": application["icon_file"],
                 "profile_indexes": [],
+                "application_ids": [],
+                "variant_names": [],
             },
         )
         entry["profile_indexes"] = unique(entry["profile_indexes"] + profile_indexes)
+        entry["application_ids"] = unique(
+            entry["application_ids"] + [str(application["application_id"])]
+        )
+        entry["variant_names"] = unique(entry["variant_names"] + [name])
 
     # Some ExitLag application records have icons and names but lost the
     # application-id link to their executable profile. Restore exact stem
@@ -447,7 +531,10 @@ def build(
                 merged[target_key]["profile_indexes"] + [profile["catalog_index"]]
             )
 
-    source_entries = sorted(merged.values(), key=lambda item: item["name"].casefold())
+    source_entries = sorted(
+        coalesce_application_variants(list(merged.values())),
+        key=lambda item: item["name"].casefold(),
+    )
     services: list[dict[str, Any]] = []
     opencck_files = opencck_files or []
     portal_count = sum(len(load_json(path)) for path in opencck_files if path.exists())
@@ -469,11 +556,6 @@ def build(
                 if converted is not None and converted not in rules:
                     rules.append(converted)
 
-        application_id = application["id"]
-        rules.extend(MANUAL_APPLICATION_RULES.get(application_id, []))
-        for rule in MANUAL_APPLICATION_RULES.get(application_id, []):
-            keywords.extend(rule.get("process_name", []))
-
         if not rules:
             continue
 
@@ -491,14 +573,24 @@ def build(
         proxy_count = sum(rule["outbound"] == "proxy" for rule in rules)
         services.append(
             {
-                "id": application_id,
+                "id": application["id"],
                 "name": application["name"],
                 "icon": [column * ICON_SIZE, row * ICON_SIZE, ICON_SIZE, ICON_SIZE],
                 "keywords": unique([value for value in keywords if value]),
                 "aliases": unique(
                     service_aliases(application["name"])
-                    + MANUAL_APPLICATION_ALIASES.get(application_id, [])
+                    + [
+                        alias
+                        for variant_name in application.get("variant_names", [])
+                        for alias in [
+                            variant_name,
+                            normalized(variant_name),
+                            compact(variant_name),
+                        ]
+                        if alias
+                    ]
                 ),
+                "legacy_ids": application.get("legacy_ids", []),
                 "category": category_for_service(application["name"]),
                 "source": "exitlag",
                 "direct_rule_count": direct_count,
@@ -527,6 +619,7 @@ def build(
                 "lol launcher",
                 "riot launcher",
             ],
+            "legacy_ids": [],
             "category": "games",
             "source": "manual",
             "direct_rule_count": 0,
@@ -572,6 +665,7 @@ def build(
                     "icon": [],
                     "keywords": [],
                     "aliases": unique([portal, brand, normalized(portal), compact(portal)]),
+                    "legacy_ids": [],
                     "category": BRAND_CATEGORIES.get(
                         brand, portal_categories.get(portal.casefold(), "other")
                     ),

@@ -2182,6 +2182,14 @@ Are you sure?</source>
         <translation>Сейчас включено</translation>
     </message>
     <message>
+        <source>Library</source>
+        <translation>Библиотека</translation>
+    </message>
+    <message>
+        <source>Ping, change the server, or remove an enabled service.</source>
+        <translation>Проверьте пинг, смените сервер или уберите включённый сервис.</translation>
+    </message>
+    <message>
         <source>Selected services and their assigned configurations</source>
         <translation>Выбранные сервисы и назначенные им конфигурации</translation>
     </message>
@@ -2198,6 +2206,16 @@ Are you sure?</source>
 Domains: %2</source>
         <translation>Исполняемые файлы: %1
 Домены: %2</translation>
+    </message>
+    <message>
+        <source>%1
+%2
+Executables: %3
+Domains: %4</source>
+        <translation>%1
+%2
+Исполняемые файлы: %3
+Домены: %4</translation>
     </message>
     <message>
         <source>No Game Mod services found</source>

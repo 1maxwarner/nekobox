@@ -20,9 +20,12 @@
 class QLabel;
 class QComboBox;
 class QLineEdit;
+class QListView;
 class QListWidget;
 class QListWidgetItem;
 class QPushButton;
+class GameModFilterProxyModel;
+class GameModServiceModel;
 
 extern QVariantMap ruleSetMap;
 
@@ -72,7 +75,7 @@ private:
     void updateRouteProfileControls();
     void setupGameModTab();
     void filterGameModServices(const QString &query);
-    void updateGameModSummary();
+    void updateGameModSummary(bool refreshEnabled = true);
     void setVisibleGameModServicesChecked(bool checked);
     void refreshGameModEnabledServices();
 
@@ -91,14 +94,15 @@ private:
 
     AutoCompleteTextEdit* rule_editor;
     QLineEdit *gameModSearch = nullptr;
-    QListWidget *gameModServices = nullptr;
+    QListView *gameModServices = nullptr;
     QListWidget *gameModEnabledServices = nullptr;
     QListWidget *gameModCategory = nullptr;
+    GameModServiceModel *gameModServiceModel = nullptr;
+    GameModFilterProxyModel *gameModServiceProxy = nullptr;
     QLabel *gameModSummary = nullptr;
     QPushButton *gameModSelectVisible = nullptr;
     QPushButton *gameModClearVisible = nullptr;
     QWidget *gameModTab = nullptr;
-    QHash<QString, int> gameModProfileAssignments;
     QList<QPair<int, QString>> gameModProfileChoices;
 public slots:
     void accept() override;

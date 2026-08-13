@@ -18,6 +18,7 @@ struct Service {
     QRect iconRect;
     QStringList keywords;
     QStringList aliases;
+    QStringList legacyIds;
     QStringList domains;
     int directRuleCount = 0;
     int proxyRuleCount = 0;

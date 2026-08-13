@@ -7,4 +7,8 @@
 - perf: replace per-service widgets with a lightweight category sidebar and service grid
 - feat: add live ping, server switching, and removal controls to enabled services
 - feat: add a League Launcher route for 3.64.0.0/12
-- fix: retain ExitLag application 2784 (FACEIT) when its exported profile link is empty
+- perf: virtualize the 2900-service library and separate enabled connections from the library
+- feat: replace the legacy routes with the exact ExitLag memory-pointer export and merge OpenCCK stable/beta at the same routing level
+- feat: combine OpenCCK brand components and ExitLag beta/region variants under one service card while preserving legacy IDs
+- perf: cache the catalog and icon atlas and pre-index smart search data for faster Game Mod reopen and filtering
+- fix: use the exact ExitLag profile for FACEIT application 2784

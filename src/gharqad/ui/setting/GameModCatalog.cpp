@@ -14,24 +14,34 @@ namespace GameMod {
 namespace {
 
 QJsonObject LoadCatalog(QString *error) {
-    QFile file(getResource(QStringLiteral("game_mod/catalog.json")));
-    if (!file.open(QIODevice::ReadOnly)) {
-        if (error != nullptr)
-            *error = QCoreApplication::translate(
+    struct CachedCatalog {
+        QJsonObject root;
+        QString error;
+    };
+    static const CachedCatalog cache = [] {
+        CachedCatalog result;
+        QFile file(getResource(QStringLiteral("game_mod/catalog.json")));
+        if (!file.open(QIODevice::ReadOnly)) {
+            result.error = QCoreApplication::translate(
                 "GameMod", "Game Mod catalog is not available");
-        return {};
-    }
-
-    QJsonParseError parseError;
-    const auto document = QJsonDocument::fromJson(file.readAll(), &parseError);
-    if (parseError.error != QJsonParseError::NoError || !document.isObject()) {
-        if (error != nullptr)
-            *error = QCoreApplication::translate(
-                         "GameMod", "Game Mod catalog is invalid: %1")
-                         .arg(parseError.errorString());
-        return {};
-    }
-    return document.object();
+            return result;
+        }
+        QJsonParseError parseError;
+        const auto document = QJsonDocument::fromJson(file.readAll(), &parseError);
+        if (parseError.error != QJsonParseError::NoError ||
+            !document.isObject()) {
+            result.error =
+                QCoreApplication::translate(
+                    "GameMod", "Game Mod catalog is invalid: %1")
+                    .arg(parseError.errorString());
+            return result;
+        }
+        result.root = document.object();
+        return result;
+    }();
+    if (error != nullptr)
+        *error = cache.error;
+    return cache.root;
 }
 
 QStringList StringArray(const QJsonArray &array) {
@@ -69,6 +79,8 @@ QList<Service> LoadServices(QString *error) {
             StringArray(object.value(QStringLiteral("keywords")).toArray());
         service.aliases =
             StringArray(object.value(QStringLiteral("aliases")).toArray());
+        service.legacyIds =
+            StringArray(object.value(QStringLiteral("legacy_ids")).toArray());
         for (const auto &ruleValue : object.value(QStringLiteral("rules")).toArray()) {
             const auto rule = ruleValue.toObject();
             service.domains += StringArray(rule.value(QStringLiteral("domain")).toArray());
@@ -86,9 +98,12 @@ QList<Service> LoadServices(QString *error) {
 }
 
 QPixmap LoadIconAtlas(QString *error) {
-    QPixmap atlas;
-    if (!atlas.load(getResource(QStringLiteral("game_mod/icons.png"))) &&
-        error != nullptr) {
+    static const QPixmap atlas = [] {
+        QPixmap result;
+        result.load(getResource(QStringLiteral("game_mod/icons.png")));
+        return result;
+    }();
+    if (atlas.isNull() && error != nullptr) {
         *error = QCoreApplication::translate(
             "GameMod", "Game Mod icon atlas is not available");
     }
@@ -107,14 +122,29 @@ QJsonArray BuildRules(const QStringList &enabledServiceIds,
     QJsonArray result;
     for (const auto &value : root.value(QStringLiteral("services")).toArray()) {
         const auto service = value.toObject();
-        if (!enabled.contains(service.value(QStringLiteral("id")).toString()))
-            continue;
         const auto serviceId = service.value(QStringLiteral("id")).toString();
+        const auto legacyIds =
+            StringArray(service.value(QStringLiteral("legacy_ids")).toArray());
+        QString matchedId;
+        if (enabled.contains(serviceId)) {
+            matchedId = serviceId;
+        } else {
+            for (const auto &legacyId : legacyIds) {
+                if (enabled.contains(legacyId)) {
+                    matchedId = legacyId;
+                    break;
+                }
+            }
+        }
+        if (matchedId.isEmpty())
+            continue;
         for (const auto &ruleValue : service.value(QStringLiteral("rules")).toArray()) {
             auto rule = ruleValue.toObject();
             rule.remove(QStringLiteral("catalog_source"));
             if (rule.value(QStringLiteral("outbound")).toString() == QStringLiteral("proxy")) {
-                const auto outbound = serviceOutbounds.value(serviceId);
+                auto outbound = serviceOutbounds.value(serviceId);
+                if (outbound.isEmpty())
+                    outbound = serviceOutbounds.value(matchedId);
                 if (!outbound.isEmpty())
                     rule.insert(QStringLiteral("outbound"), outbound);
             }

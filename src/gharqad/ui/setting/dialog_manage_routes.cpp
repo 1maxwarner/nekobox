@@ -4,6 +4,7 @@
 #include <nekobox/configs/proxy/WireguardBean.h>
 
 #include <QClipboard>
+#include <QAbstractListModel>
 #include <QAbstractItemView>
 #include <QApplication>
 #include <QComboBox>
@@ -17,16 +18,21 @@
 #include <QListView>
 #include <QListWidget>
 #include <QPainter>
+#include <QPersistentModelIndex>
 #include <QPointer>
 #include <QPushButton>
 #include <QRegularExpression>
 #include <QSet>
 #include <QSignalBlocker>
+#include <QSortFilterProxyModel>
 #include <QSplitter>
+#include <QStyle>
+#include <QTabWidget>
 #include <QToolButton>
 #include <QVBoxLayout>
 #include <algorithm>
 #include <memory>
+#include <utility>
 
 #include <nekobox/dataStore/Database.hpp>
 
@@ -54,6 +60,7 @@ namespace {
 enum GameModItemRole {
     ServiceIdRole = Qt::UserRole,
     SearchRole,
+    CompactSearchRole,
     CategoryRole,
     ProfileIdRole,
     BaseIconRole,
@@ -68,20 +75,17 @@ QString NormalizeGameModSearch(QString value) {
     return value.simplified();
 }
 
-bool SmartGameModMatch(const QString &corpus, const QString &query) {
-    const auto normalizedQuery = NormalizeGameModSearch(query);
+bool SmartGameModMatch(const QString &corpus, const QString &compactCorpus,
+                       const QString &normalizedQuery,
+                       const QString &compactQuery,
+                       const QStringList &queryTokens) {
     if (normalizedQuery.isEmpty())
         return true;
-    const auto normalizedCorpus = NormalizeGameModSearch(corpus);
-    const auto compactQuery = QString(normalizedQuery).remove(QLatin1Char(' '));
-    const auto compactCorpus = QString(normalizedCorpus).remove(QLatin1Char(' '));
-    if (normalizedCorpus.contains(normalizedQuery) ||
-        compactCorpus.contains(compactQuery))
+    if (corpus.contains(normalizedQuery) || compactCorpus.contains(compactQuery))
         return true;
-    const auto tokens = normalizedQuery.split(QLatin1Char(' '), Qt::SkipEmptyParts);
-    return std::all_of(tokens.cbegin(), tokens.cend(),
-                       [&normalizedCorpus](const QString &token) {
-                           return normalizedCorpus.contains(token);
+    return std::all_of(queryTokens.cbegin(), queryTokens.cend(),
+                       [&corpus](const QString &token) {
+                           return corpus.contains(token);
                        });
 }
 
@@ -133,6 +137,266 @@ QString GameModProfileLabel(int profileId, bool compact = false) {
     return label;
 }
 } // namespace
+
+struct GameModServiceEntry {
+    GameMod::Service service;
+    QString displayName;
+    QString details;
+    QString searchCorpus;
+    QString compactSearchCorpus;
+    int profileId = -1;
+    bool enabled = false;
+};
+
+class GameModServiceModel final : public QAbstractListModel {
+public:
+    GameModServiceModel(const QList<GameMod::Service> &services,
+                        const QPixmap &atlas,
+                        const QSet<QString> &enabled,
+                        const QHash<QString, int> &assignments,
+                        QObject *parent)
+        : QAbstractListModel(parent), atlas(atlas) {
+        entries.reserve(services.size());
+        iconCache.resize(services.size());
+        for (const auto &service : services) {
+            GameModServiceEntry entry;
+            entry.service = service;
+            entry.displayName = service.name;
+            if (entry.displayName.compare(QStringLiteral("faceit"),
+                                          Qt::CaseInsensitive) == 0) {
+                entry.displayName = QStringLiteral("FACEIT");
+            } else if (!entry.displayName.isEmpty()) {
+                entry.displayName[0] = entry.displayName.at(0).toUpper();
+            }
+            entry.details = QCoreApplication::translate(
+                                "DialogManageRoutes",
+                                "%1 rules  ·  %2 domains")
+                                .arg(service.proxyRuleCount +
+                                     service.directRuleCount)
+                                .arg(service.domains.size());
+            entry.searchCorpus = NormalizeGameModSearch(
+                QStringList{service.id, service.name, service.category,
+                            service.aliases.join(QLatin1Char(' ')),
+                            service.keywords.join(QLatin1Char(' ')),
+                            service.domains.join(QLatin1Char(' '))}
+                    .join(QLatin1Char(' ')));
+            entry.compactSearchCorpus =
+                QString(entry.searchCorpus).remove(QLatin1Char(' '));
+            entry.profileId = assignments.value(service.id, -1);
+            if (entry.profileId < 0) {
+                for (const auto &legacyId : service.legacyIds) {
+                    if (assignments.contains(legacyId)) {
+                        entry.profileId = assignments.value(legacyId);
+                        break;
+                    }
+                }
+            }
+            entry.enabled = enabled.contains(service.id);
+            if (!entry.enabled) {
+                entry.enabled = std::any_of(
+                    service.legacyIds.cbegin(), service.legacyIds.cend(),
+                    [&enabled](const QString &legacyId) {
+                        return enabled.contains(legacyId);
+                    });
+            }
+            entries.append(std::move(entry));
+        }
+    }
+
+    int rowCount(const QModelIndex &parent = QModelIndex()) const override {
+        return parent.isValid() ? 0 : entries.size();
+    }
+
+    QVariant data(const QModelIndex &index, int role) const override {
+        if (!index.isValid() || index.row() < 0 || index.row() >= entries.size())
+            return {};
+        const auto &entry = entries.at(index.row());
+        switch (role) {
+        case Qt::DisplayRole:
+            return entry.displayName;
+        case Qt::DecorationRole: {
+            const auto resolvedProfile =
+                entry.profileId >= 0 ? entry.profileId
+                                     : Configs::dataStore->started_id;
+            const bool active = entry.enabled && resolvedProfile >= 0 &&
+                                resolvedProfile == Configs::dataStore->started_id;
+            return GameModIconWithStatus(baseIcon(index.row()), active);
+        }
+        case Qt::CheckStateRole:
+            return entry.enabled ? Qt::Checked : Qt::Unchecked;
+        case Qt::SizeHintRole:
+            return QSize(154, 94);
+        case Qt::TextAlignmentRole:
+            return int(Qt::AlignHCenter | Qt::AlignTop);
+        case Qt::ToolTipRole:
+            return QCoreApplication::translate(
+                       "DialogManageRoutes",
+                       "%1\n%2\nExecutables: %3\nDomains: %4")
+                .arg(entry.displayName)
+                .arg(entry.details)
+                .arg(entry.service.keywords.mid(0, 16).join(
+                    QStringLiteral(", ")))
+                .arg(entry.service.domains.mid(0, 16).join(
+                    QStringLiteral(", ")));
+        case ServiceIdRole:
+            return entry.service.id;
+        case SearchRole:
+            return entry.searchCorpus;
+        case CompactSearchRole:
+            return entry.compactSearchCorpus;
+        case CategoryRole:
+            return entry.service.category;
+        case ProfileIdRole:
+            return entry.profileId;
+        case BaseIconRole:
+            return baseIcon(index.row());
+        case DisplayNameRole:
+            return entry.displayName;
+        case DetailTextRole:
+            return entry.details;
+        default:
+            return {};
+        }
+    }
+
+    bool setData(const QModelIndex &index, const QVariant &value,
+                 int role) override {
+        if (!index.isValid() || index.row() < 0 || index.row() >= entries.size())
+            return false;
+        auto &entry = entries[index.row()];
+        if (role == Qt::CheckStateRole) {
+            const bool enabled = value.toInt() == Qt::Checked;
+            if (entry.enabled == enabled)
+                return false;
+            entry.enabled = enabled;
+            emit dataChanged(index, index,
+                             {Qt::CheckStateRole, Qt::DecorationRole});
+            return true;
+        }
+        if (role == ProfileIdRole) {
+            const auto profileId = value.toInt();
+            if (entry.profileId == profileId)
+                return false;
+            entry.profileId = profileId;
+            emit dataChanged(index, index,
+                             {ProfileIdRole, Qt::DecorationRole});
+            return true;
+        }
+        return false;
+    }
+
+    Qt::ItemFlags flags(const QModelIndex &index) const override {
+        if (!index.isValid())
+            return Qt::NoItemFlags;
+        return Qt::ItemIsEnabled | Qt::ItemIsSelectable |
+               Qt::ItemIsUserCheckable;
+    }
+
+    int enabledCount() const {
+        return std::count_if(entries.cbegin(), entries.cend(),
+                             [](const auto &entry) { return entry.enabled; });
+    }
+
+    void setRowsChecked(const QList<int> &rows, bool checked) {
+        bool changed = false;
+        for (const auto row : rows) {
+            if (row < 0 || row >= entries.size() ||
+                entries[row].enabled == checked)
+                continue;
+            entries[row].enabled = checked;
+            changed = true;
+        }
+        if (changed && !entries.isEmpty())
+            emit dataChanged(index(0), index(entries.size() - 1),
+                             {Qt::CheckStateRole, Qt::DecorationRole});
+    }
+
+    QStringList enabledServiceIds() const {
+        QStringList result;
+        for (const auto &entry : entries) {
+            if (entry.enabled)
+                result.append(entry.service.id);
+        }
+        return result;
+    }
+
+    QJsonObject profileAssignments() const {
+        QJsonObject result;
+        for (const auto &entry : entries) {
+            if (entry.profileId >= 0)
+                result.insert(entry.service.id, entry.profileId);
+        }
+        return result;
+    }
+
+    QIcon baseIcon(int row) const {
+        if (row < 0 || row >= entries.size())
+            return {};
+        if (iconCache[row].isNull() && !atlas.isNull() &&
+            entries.at(row).service.iconRect.isValid()) {
+            iconCache[row] =
+                QIcon(atlas.copy(entries.at(row).service.iconRect));
+        }
+        return iconCache.at(row);
+    }
+
+private:
+    QList<GameModServiceEntry> entries;
+    QPixmap atlas;
+    mutable QList<QIcon> iconCache;
+};
+
+class GameModFilterProxyModel final : public QSortFilterProxyModel {
+public:
+    explicit GameModFilterProxyModel(QObject *parent)
+        : QSortFilterProxyModel(parent) {
+        setDynamicSortFilter(true);
+        setSortCaseSensitivity(Qt::CaseInsensitive);
+    }
+
+    void setCategory(QString value) {
+        if (category == value)
+            return;
+        category = std::move(value);
+        invalidateFilter();
+    }
+
+    void setQuery(QString value) {
+        value = NormalizeGameModSearch(std::move(value));
+        if (normalizedQuery == value)
+            return;
+        normalizedQuery = std::move(value);
+        compactQuery = QString(normalizedQuery).remove(QLatin1Char(' '));
+        queryTokens = normalizedQuery.split(QLatin1Char(' '),
+                                            Qt::SkipEmptyParts);
+        invalidateFilter();
+    }
+
+protected:
+    bool filterAcceptsRow(int sourceRow,
+                          const QModelIndex &sourceParent) const override {
+        const auto sourceIndex = sourceModel()->index(sourceRow, 0, sourceParent);
+        return (category.isEmpty() ||
+                sourceIndex.data(CategoryRole).toString() == category) &&
+               SmartGameModMatch(
+                   sourceIndex.data(SearchRole).toString(),
+                   sourceIndex.data(CompactSearchRole).toString(),
+                   normalizedQuery, compactQuery, queryTokens);
+    }
+
+    bool lessThan(const QModelIndex &left,
+                  const QModelIndex &right) const override {
+        return left.data(DisplayNameRole)
+                   .toString()
+                   .localeAwareCompare(right.data(DisplayNameRole).toString()) < 0;
+    }
+
+private:
+    QString category;
+    QString normalizedQuery;
+    QString compactQuery;
+    QStringList queryTokens;
+};
 
 
 void DialogManageRoutes::reloadProfileItems() {
@@ -242,7 +506,7 @@ void DialogManageRoutes::setupGameModTab() {
     gameModTab = new QWidget(ui->routes_tab);
     gameModTab->setObjectName(QStringLiteral("game_mod_tab"));
     auto *layout = new QVBoxLayout(gameModTab);
-    layout->setContentsMargins(16, 16, 16, 16);
+    layout->setContentsMargins(18, 18, 18, 18);
     layout->setSpacing(12);
 
     auto *title = new QLabel(tr("Game Mod"), gameModTab);
@@ -262,11 +526,43 @@ void DialogManageRoutes::setupGameModTab() {
     layout->addWidget(description);
 
     gameModTab->setStyleSheet(QStringLiteral(
-        "#game_mod_enabled_panel { border: 1px solid palette(mid); border-radius: 10px; }"
         "#game_mod_category_panel { border: 1px solid palette(mid); border-radius: 10px; }"
         "#game_mod_category { border: 0; background: transparent; }"
-        "#game_mod_services { border: 1px solid palette(mid); border-radius: 8px; }"
-        "#game_mod_enabled_services { border: 0; background: transparent; }"));
+        "#game_mod_services { border: 0; background: transparent; }"
+        "#game_mod_enabled_services { border: 0; background: transparent; }"
+        "#game_mod_enabled_card { border: 1px solid palette(mid); "
+        "border-radius: 10px; background: palette(alternate-base); }"));
+
+    auto *pages = new QTabWidget(gameModTab);
+    pages->setObjectName(QStringLiteral("game_mod_pages"));
+
+    auto *enabledPage = new QWidget(pages);
+    auto *enabledPageLayout = new QVBoxLayout(enabledPage);
+    enabledPageLayout->setContentsMargins(10, 12, 10, 10);
+    enabledPageLayout->setSpacing(8);
+    auto *enabledHint = new QLabel(
+        tr("Ping, change the server, or remove an enabled service."),
+        enabledPage);
+    enabledHint->setWordWrap(true);
+    enabledPageLayout->addWidget(enabledHint);
+    gameModEnabledServices = new QListWidget(enabledPage);
+    gameModEnabledServices->setObjectName(
+        QStringLiteral("game_mod_enabled_services"));
+    gameModEnabledServices->setViewMode(QListView::IconMode);
+    gameModEnabledServices->setResizeMode(QListView::Adjust);
+    gameModEnabledServices->setMovement(QListView::Static);
+    gameModEnabledServices->setWrapping(true);
+    gameModEnabledServices->setSelectionMode(QAbstractItemView::NoSelection);
+    gameModEnabledServices->setGridSize(QSize(390, 122));
+    gameModEnabledServices->setSpacing(8);
+    gameModEnabledServices->setVerticalScrollMode(
+        QAbstractItemView::ScrollPerPixel);
+    enabledPageLayout->addWidget(gameModEnabledServices, 1);
+
+    auto *libraryPage = new QWidget(pages);
+    auto *libraryLayout = new QVBoxLayout(libraryPage);
+    libraryLayout->setContentsMargins(10, 12, 10, 10);
+    libraryLayout->setSpacing(10);
 
     auto *toolbar = new QHBoxLayout();
     toolbar->setSpacing(8);
@@ -286,13 +582,13 @@ void DialogManageRoutes::setupGameModTab() {
     gameModClearVisible->setObjectName(QStringLiteral("game_mod_disable_shown"));
     toolbar->addWidget(gameModSelectVisible);
     toolbar->addWidget(gameModClearVisible);
-    layout->addLayout(toolbar);
+    libraryLayout->addLayout(toolbar);
 
     gameModSummary = new QLabel(gameModTab);
     gameModSummary->setObjectName(QStringLiteral("game_mod_summary"));
-    layout->addWidget(gameModSummary);
+    libraryLayout->addWidget(gameModSummary);
 
-    auto *splitter = new QSplitter(Qt::Horizontal, gameModTab);
+    auto *splitter = new QSplitter(Qt::Horizontal, libraryPage);
     splitter->setChildrenCollapsible(false);
 
     auto *categoryPanel = new QWidget(splitter);
@@ -308,7 +604,7 @@ void DialogManageRoutes::setupGameModTab() {
     gameModCategory->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
     categoryLayout->addWidget(gameModCategory, 1);
 
-    gameModServices = new QListWidget(splitter);
+    gameModServices = new QListView(splitter);
     gameModServices->setObjectName(QStringLiteral("game_mod_services"));
     gameModServices->setViewMode(QListView::IconMode);
     gameModServices->setResizeMode(QListView::Adjust);
@@ -316,44 +612,23 @@ void DialogManageRoutes::setupGameModTab() {
     gameModServices->setWrapping(true);
     gameModServices->setWordWrap(true);
     gameModServices->setSelectionMode(QAbstractItemView::NoSelection);
-    gameModServices->setIconSize(QSize(48, 48));
-    gameModServices->setGridSize(QSize(184, 104));
-    gameModServices->setSpacing(4);
+    gameModServices->setIconSize(QSize(52, 52));
+    gameModServices->setGridSize(QSize(162, 102));
+    gameModServices->setSpacing(6);
     gameModServices->setUniformItemSizes(true);
     gameModServices->setVerticalScrollMode(QAbstractItemView::ScrollPerPixel);
-    gameModServices->setSortingEnabled(true);
-    gameModServices->sortItems(Qt::AscendingOrder);
-
-    auto *enabledPanel = new QWidget(splitter);
-    enabledPanel->setObjectName(QStringLiteral("game_mod_enabled_panel"));
-    auto *enabledLayout = new QVBoxLayout(enabledPanel);
-    enabledLayout->setContentsMargins(10, 10, 10, 10);
-    enabledLayout->setSpacing(6);
-    auto *enabledTitle = new QLabel(tr("Enabled now"), enabledPanel);
-    auto enabledTitleFont = enabledTitle->font();
-    enabledTitleFont.setBold(true);
-    enabledTitle->setFont(enabledTitleFont);
-    enabledLayout->addWidget(enabledTitle);
-    auto *enabledHint = new QLabel(
-        tr("Selected services and their assigned configurations"), enabledPanel);
-    enabledHint->setWordWrap(true);
-    enabledLayout->addWidget(enabledHint);
-    gameModEnabledServices = new QListWidget(enabledPanel);
-    gameModEnabledServices->setObjectName(
-        QStringLiteral("game_mod_enabled_services"));
-    gameModEnabledServices->setIconSize(QSize(36, 36));
-    gameModEnabledServices->setVerticalScrollMode(
-        QAbstractItemView::ScrollPerPixel);
-    enabledLayout->addWidget(gameModEnabledServices, 1);
 
     splitter->addWidget(categoryPanel);
     splitter->addWidget(gameModServices);
-    splitter->addWidget(enabledPanel);
     splitter->setStretchFactor(0, 0);
     splitter->setStretchFactor(1, 3);
-    splitter->setStretchFactor(2, 2);
-    splitter->setSizes({190, 720, 380});
-    layout->addWidget(splitter, 1);
+    splitter->setSizes({190, 1050});
+    libraryLayout->addWidget(splitter, 1);
+
+    pages->addTab(enabledPage, tr("Enabled now"));
+    pages->addTab(libraryPage, tr("Library"));
+    pages->setCurrentWidget(libraryPage);
+    layout->addWidget(pages, 1);
 
     QString catalogError;
     const auto services = GameMod::LoadServices(&catalogError);
@@ -362,10 +637,13 @@ void DialogManageRoutes::setupGameModTab() {
         Configs::dataStore->routing->game_mod_enabled_services.cbegin(),
         Configs::dataStore->routing->game_mod_enabled_services.cend());
     QSet<QString> availableServiceIds;
-    for (const auto &service : services)
+    for (const auto &service : services) {
         availableServiceIds.insert(service.id);
+        for (const auto &legacyId : service.legacyIds)
+            availableServiceIds.insert(legacyId);
+    }
     enabled.intersect(availableServiceIds);
-    gameModProfileAssignments = ParseGameModProfileAssignments(
+    const auto profileAssignments = ParseGameModProfileAssignments(
         Configs::dataStore->routing->game_mod_service_profiles);
 
     QSet<int> profileIds;
@@ -390,46 +668,16 @@ void DialogManageRoutes::setupGameModTab() {
                   return left.second.localeAwareCompare(right.second) < 0;
               });
 
-    QSet<QString> categories;
+    gameModServiceModel = new GameModServiceModel(
+        services, atlas, enabled, profileAssignments, this);
+    gameModServiceProxy = new GameModFilterProxyModel(this);
+    gameModServiceProxy->setSourceModel(gameModServiceModel);
+    gameModServiceProxy->sort(0, Qt::AscendingOrder);
+    gameModServices->setModel(gameModServiceProxy);
 
-    for (const auto &service : services) {
-        auto displayName = service.name;
-        if (!displayName.isEmpty())
-            displayName[0] = displayName.at(0).toUpper();
-        const auto ruleCount = service.proxyRuleCount + service.directRuleCount;
-        const auto details = tr("%1 rules  ·  %2 domains")
-                                 .arg(ruleCount)
-                                 .arg(service.domains.size());
-        auto *item = new QListWidgetItem();
-        item->setFlags(item->flags() | Qt::ItemIsUserCheckable);
-        item->setCheckState(enabled.contains(service.id) ? Qt::Checked
-                                                         : Qt::Unchecked);
-        const QIcon baseIcon =
-            atlas.isNull() ? QIcon() : QIcon(atlas.copy(service.iconRect));
-        item->setIcon(baseIcon);
-        item->setText(displayName + QStringLiteral("\n") + details);
-        item->setData(ServiceIdRole, service.id);
-        item->setData(CategoryRole, service.category);
-        item->setData(ProfileIdRole,
-                      gameModProfileAssignments.value(service.id, -1));
-        item->setData(BaseIconRole, baseIcon);
-        item->setData(DisplayNameRole, displayName);
-        item->setData(DetailTextRole, details);
-        item->setData(
-            SearchRole,
-            QStringList{service.name, service.category,
-                        service.aliases.join(QLatin1Char(' ')),
-                        service.keywords.join(QLatin1Char(' ')),
-                        service.domains.join(QLatin1Char(' '))}
-                .join(QLatin1Char(' ')));
-        item->setToolTip(
-            tr("Executables: %1\nDomains: %2")
-                   .arg(service.keywords.mid(0, 16).join(QStringLiteral(", ")),
-                        service.domains.mid(0, 16).join(QStringLiteral(", "))));
-        item->setSizeHint(QSize(176, 96));
-        gameModServices->addItem(item);
+    QSet<QString> categories;
+    for (const auto &service : services)
         categories.insert(service.category);
-    }
 
     QList<QPair<QString, QString>> categoryChoices;
     for (const auto &category : categories)
@@ -448,19 +696,17 @@ void DialogManageRoutes::setupGameModTab() {
     gameModCategory->setCurrentRow(0);
 
     if (services.isEmpty()) {
-        auto *item = new QListWidgetItem(
+        gameModSummary->setText(
             catalogError.isEmpty() ? tr("No Game Mod services found")
-                                   : catalogError,
-            gameModServices);
-        item->setFlags(Qt::NoItemFlags);
+                                   : catalogError);
     }
 
     connect(gameModSearch, &QLineEdit::textChanged, this,
             &DialogManageRoutes::filterGameModServices);
     connect(gameModCategory, &QListWidget::currentItemChanged, this,
             [this] { filterGameModServices(gameModSearch->text()); });
-    connect(gameModServices, &QListWidget::itemChanged, this,
-            [this](QListWidgetItem *) { updateGameModSummary(); });
+    connect(gameModServiceModel, &QAbstractItemModel::dataChanged, this,
+            [this] { updateGameModSummary(); });
     connect(gameModSelectVisible, &QPushButton::clicked, this,
             [this] { setVisibleGameModServicesChecked(true); });
     connect(gameModClearVisible, &QPushButton::clicked, this,
@@ -476,76 +722,55 @@ void DialogManageRoutes::filterGameModServices(const QString &query) {
                               : gameModCategory->currentItem()
                                     ->data(CategoryRole)
                                     .toString();
-    for (int row = 0; row < gameModServices->count(); ++row) {
-        auto *item = gameModServices->item(row);
-        const bool categoryMatches =
-            category.isEmpty() || item->data(CategoryRole).toString() == category;
-        item->setHidden(
-            !categoryMatches ||
-            !SmartGameModMatch(item->data(SearchRole).toString(), query));
-    }
-    updateGameModSummary();
+    gameModServiceProxy->setCategory(category);
+    gameModServiceProxy->setQuery(query);
+    updateGameModSummary(false);
 }
 
-void DialogManageRoutes::updateGameModSummary() {
-    const QSignalBlocker treeBlocker(gameModServices);
-    int enabled = 0;
-    int visible = 0;
-    for (int row = 0; row < gameModServices->count(); ++row) {
-        auto *item = gameModServices->item(row);
-        if (!(item->flags() & Qt::ItemIsUserCheckable))
-            continue;
-        if (!item->isHidden())
-            ++visible;
-        if (item->checkState() == Qt::Checked)
-            ++enabled;
-        const auto configuredProfile = item->data(ProfileIdRole).toInt();
-        const auto resolvedProfile = configuredProfile >= 0
-                                         ? configuredProfile
-                                         : Configs::dataStore->started_id;
-        const bool active = item->checkState() == Qt::Checked &&
-                            resolvedProfile >= 0 &&
-                            resolvedProfile == Configs::dataStore->started_id;
-        const auto baseIcon = qvariant_cast<QIcon>(item->data(BaseIconRole));
-        item->setIcon(GameModIconWithStatus(baseIcon, active));
-    }
+void DialogManageRoutes::updateGameModSummary(bool refreshEnabled) {
+    if (gameModServiceModel == nullptr || gameModServiceProxy == nullptr)
+        return;
     gameModSummary->setText(
         tr("%1 enabled  |  %2 shown of %3 services")
-            .arg(enabled)
-            .arg(visible)
-            .arg(gameModServices->count()));
-    refreshGameModEnabledServices();
+            .arg(gameModServiceModel->enabledCount())
+            .arg(gameModServiceProxy->rowCount())
+            .arg(gameModServiceModel->rowCount()));
+    gameModServices->viewport()->update();
+    if (refreshEnabled)
+        refreshGameModEnabledServices();
 }
 
 void DialogManageRoutes::refreshGameModEnabledServices() {
     gameModEnabledServices->clear();
-    for (int row = 0; row < gameModServices->count(); ++row) {
-        auto *sourceItem = gameModServices->item(row);
-        if (sourceItem->checkState() != Qt::Checked ||
-            !(sourceItem->flags() & Qt::ItemIsUserCheckable))
+    for (int row = 0; row < gameModServiceModel->rowCount(); ++row) {
+        const QPersistentModelIndex sourceIndex =
+            gameModServiceModel->index(row, 0);
+        if (sourceIndex.data(Qt::CheckStateRole).toInt() != Qt::Checked)
             continue;
-        const auto serviceId = sourceItem->data(ServiceIdRole).toString();
-        const auto configuredProfile = sourceItem->data(ProfileIdRole).toInt();
+        const auto configuredProfile = sourceIndex.data(ProfileIdRole).toInt();
         const auto resolvedProfile = configuredProfile >= 0
                                          ? configuredProfile
                                          : Configs::dataStore->started_id;
         const bool active = resolvedProfile >= 0 &&
                             resolvedProfile == Configs::dataStore->started_id;
         auto *item = new QListWidgetItem(gameModEnabledServices);
-        item->setSizeHint(QSize(0, 82));
+        item->setSizeHint(QSize(374, 112));
         auto *rowWidget = new QWidget(gameModEnabledServices);
+        rowWidget->setObjectName(QStringLiteral("game_mod_enabled_card"));
         auto *rowLayout = new QHBoxLayout(rowWidget);
-        rowLayout->setContentsMargins(4, 4, 4, 4);
-        rowLayout->setSpacing(6);
+        rowLayout->setContentsMargins(12, 10, 10, 10);
+        rowLayout->setSpacing(10);
         auto *icon = new QLabel(rowWidget);
         icon->setPixmap(GameModIconWithStatus(
-                            qvariant_cast<QIcon>(sourceItem->data(BaseIconRole)),
+                            qvariant_cast<QIcon>(sourceIndex.data(BaseIconRole)),
                             active)
-                            .pixmap(40, 40));
+                            .pixmap(48, 48));
+        icon->setFixedSize(48, 48);
         rowLayout->addWidget(icon);
         auto *content = new QVBoxLayout();
-        content->setSpacing(3);
-        auto *name = new QLabel(sourceItem->data(DisplayNameRole).toString(), rowWidget);
+        content->setSpacing(4);
+        auto *name = new QLabel(sourceIndex.data(DisplayNameRole).toString(),
+                                rowWidget);
         auto nameFont = name->font();
         nameFont.setBold(true);
         name->setFont(nameFont);
@@ -566,25 +791,30 @@ void DialogManageRoutes::refreshGameModEnabledServices() {
         auto *ping = new QToolButton(rowWidget);
         ping->setText(tr("Ping"));
         ping->setToolTip(tr("Test this server now"));
+        ping->setIcon(style()->standardIcon(QStyle::SP_BrowserReload));
         rowLayout->addWidget(ping);
         auto *remove = new QToolButton(rowWidget);
-        remove->setText(QString(QChar(0x00D7)));
+        remove->setIcon(style()->standardIcon(QStyle::SP_TitleBarCloseButton));
+        remove->setAutoRaise(true);
         remove->setToolTip(tr("Remove from enabled services"));
         rowLayout->addWidget(remove);
         gameModEnabledServices->setItemWidget(item, rowWidget);
 
         connect(profileCombo,
                 QOverload<int>::of(&QComboBox::activated), this,
-                [this, sourceItem, serviceId, profileCombo](int) {
+                [this, sourceIndex, profileCombo](int) {
                     const auto profileId = profileCombo->currentData().toInt();
-                    sourceItem->setData(ProfileIdRole, profileId);
-                    gameModProfileAssignments.insert(serviceId, profileId);
-                    QTimer::singleShot(0, this,
-                                       [this] { updateGameModSummary(); });
+                    QTimer::singleShot(0, this, [this, sourceIndex, profileId] {
+                        if (sourceIndex.isValid())
+                            gameModServiceModel->setData(sourceIndex, profileId,
+                                                         ProfileIdRole);
+                    });
                 });
-        connect(remove, &QToolButton::clicked, this, [this, sourceItem] {
-            QTimer::singleShot(0, this, [sourceItem] {
-                sourceItem->setCheckState(Qt::Unchecked);
+        connect(remove, &QToolButton::clicked, this, [this, sourceIndex] {
+            QTimer::singleShot(0, this, [this, sourceIndex] {
+                if (sourceIndex.isValid())
+                    gameModServiceModel->setData(sourceIndex, Qt::Unchecked,
+                                                 Qt::CheckStateRole);
             });
         });
         connect(ping, &QToolButton::clicked, this,
@@ -626,13 +856,15 @@ void DialogManageRoutes::refreshGameModEnabledServices() {
 }
 
 void DialogManageRoutes::setVisibleGameModServicesChecked(bool checked) {
-    QSignalBlocker blocker(gameModServices);
-    for (int row = 0; row < gameModServices->count(); ++row) {
-        auto *item = gameModServices->item(row);
-        if (!item->isHidden() && (item->flags() & Qt::ItemIsUserCheckable))
-            item->setCheckState(checked ? Qt::Checked : Qt::Unchecked);
+    QList<int> sourceRows;
+    sourceRows.reserve(gameModServiceProxy->rowCount());
+    for (int row = 0; row < gameModServiceProxy->rowCount(); ++row) {
+        const auto sourceIndex =
+            gameModServiceProxy->mapToSource(gameModServiceProxy->index(row, 0));
+        if (sourceIndex.isValid())
+            sourceRows.append(sourceIndex.row());
     }
-    updateGameModSummary();
+    gameModServiceModel->setRowsChecked(sourceRows, checked);
 }
 
 DialogManageRoutes::DialogManageRoutes(QWidget *parent, bool EditRouteProfiles,
@@ -866,8 +1098,8 @@ DialogManageRoutes::DialogManageRoutes(QWidget *parent, bool EditRouteProfiles,
 
     setupGameModTab();
     if (GameMod) {
-        resize(1320, 820);
-        setMinimumSize(1040, 680);
+        resize(1440, 900);
+        setMinimumSize(1100, 720);
         ui->routes_tab->setCurrentWidget(gameModTab);
     } else
         ui->routes_tab->setCurrentIndex(EditRouteProfiles ? 3 : 0);
@@ -997,21 +1229,10 @@ void DialogManageRoutes::accept() {
     Configs::dataStore->routing->dns_final_out_direct = ui->dns_final_out->currentIndex() == 1;
     Configs::dataStore->fake_dns = ui->enable_fakeip->isChecked();
 
-    QStringList enabledGameModServices;
-    QJsonObject gameModProfiles;
-    for (int row = 0; row < gameModServices->count(); ++row) {
-        const auto *item = gameModServices->item(row);
-        const auto serviceId = item->data(ServiceIdRole).toString();
-        if (!serviceId.isEmpty() && item->checkState() == Qt::Checked)
-            enabledGameModServices.append(serviceId);
-        const auto profileId = item->data(ProfileIdRole).toInt();
-        if (!serviceId.isEmpty() && profileId >= 0)
-            gameModProfiles.insert(serviceId, profileId);
-    }
     Configs::dataStore->routing->game_mod_enabled_services =
-        enabledGameModServices;
+        gameModServiceModel->enabledServiceIds();
     Configs::dataStore->routing->game_mod_service_profiles =
-        QString::fromUtf8(QJsonDocument(gameModProfiles).toJson(
+        QString::fromUtf8(QJsonDocument(gameModServiceModel->profileAssignments()).toJson(
             QJsonDocument::Compact));
 
     Configs::profileManager->UpdateRouteChains(chainList);
