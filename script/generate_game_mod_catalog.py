@@ -150,6 +150,40 @@ def compact(value: str) -> str:
     return normalized(value).replace(" ", "")
 
 
+def is_technical_application_name(value: str) -> bool:
+    return re.fullmatch(r"[0-9a-f]{24,64}", value.strip(), re.IGNORECASE) is not None
+
+
+def exact_application_display_name(
+    application: dict[str, Any], profiles: dict[int, dict[str, Any]]
+) -> str:
+    original = application["application_name"].strip()
+    if not is_technical_application_name(original):
+        return original
+
+    application_id = str(application["application_id"])
+    candidates: list[str] = []
+    for profile_index in application.get("profile_catalog_indexes", []):
+        profile = profiles.get(profile_index, {})
+        for metadata in profile.get("exact_memory_metadata", []):
+            owner_ids = {
+                str(metadata.get("application_id", "")),
+                str(metadata.get("owner_id", "")),
+            }
+            service_name = str(metadata.get("service_name", "")).strip()
+            if (
+                application_id in owner_ids
+                and service_name
+                and not is_technical_application_name(service_name)
+            ):
+                candidates.append(service_name)
+
+    unique_candidates = unique(candidates)
+    if len({candidate.casefold() for candidate in unique_candidates}) == 1:
+        return unique_candidates[0]
+    return original
+
+
 def service_aliases(name: str) -> list[str]:
     aliases = [normalized(name), compact(name)]
     if normalized(name) == "counter strike 2":
@@ -461,7 +495,8 @@ def build(
         profile_indexes = application.get("profile_catalog_indexes", [])
         if not application.get("icon_copied"):
             continue
-        name = application["application_name"].strip()
+        original_name = application["application_name"].strip()
+        name = exact_application_display_name(application, profiles)
         key = name.casefold()
         entry = merged.setdefault(
             key,
@@ -472,8 +507,20 @@ def build(
                 "profile_indexes": [],
                 "application_ids": [],
                 "variant_names": [],
+                "technical_source": is_technical_application_name(original_name),
             },
         )
+        if entry["technical_source"] and not is_technical_application_name(
+            original_name
+        ):
+            entry.update(
+                {
+                    "id": str(application["application_id"]),
+                    "name": name,
+                    "icon_file": application["icon_file"],
+                    "technical_source": False,
+                }
+            )
         entry["profile_indexes"] = unique(entry["profile_indexes"] + profile_indexes)
         entry["application_ids"] = unique(
             entry["application_ids"] + [str(application["application_id"])]
@@ -535,6 +582,17 @@ def build(
         coalesce_application_variants(list(merged.values())),
         key=lambda item: item["name"].casefold(),
     )
+    unresolved_names = [
+        entry["name"]
+        for entry in source_entries
+        if is_technical_application_name(entry["name"])
+        and entry["profile_indexes"]
+    ]
+    if unresolved_names:
+        raise ValueError(
+            "Exact service names are missing for technical application records: "
+            + ", ".join(unresolved_names[:20])
+        )
     services: list[dict[str, Any]] = []
     opencck_files = opencck_files or []
     portal_count = sum(len(load_json(path)) for path in opencck_files if path.exists())

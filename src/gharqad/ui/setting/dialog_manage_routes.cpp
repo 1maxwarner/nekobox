@@ -7,6 +7,7 @@
 #include <QAbstractListModel>
 #include <QAbstractItemView>
 #include <QApplication>
+#include <QCheckBox>
 #include <QComboBox>
 #include <QHBoxLayout>
 #include <QHeaderView>
@@ -63,6 +64,7 @@ enum GameModItemRole {
     CompactSearchRole,
     CategoryRole,
     ProfileIdRole,
+    ActiveRole,
     BaseIconRole,
     DisplayNameRole,
     DetailTextRole,
@@ -145,6 +147,7 @@ struct GameModServiceEntry {
     QString searchCorpus;
     QString compactSearchCorpus;
     int profileId = -1;
+    bool saved = false;
     bool enabled = false;
 };
 
@@ -152,6 +155,7 @@ class GameModServiceModel final : public QAbstractListModel {
 public:
     GameModServiceModel(const QList<GameMod::Service> &services,
                         const QPixmap &atlas,
+                        const QSet<QString> &saved,
                         const QSet<QString> &enabled,
                         const QHash<QString, int> &assignments,
                         QObject *parent)
@@ -191,6 +195,14 @@ public:
                     }
                 }
             }
+            entry.saved = saved.contains(service.id);
+            if (!entry.saved) {
+                entry.saved = std::any_of(
+                    service.legacyIds.cbegin(), service.legacyIds.cend(),
+                    [&saved](const QString &legacyId) {
+                        return saved.contains(legacyId);
+                    });
+            }
             entry.enabled = enabled.contains(service.id);
             if (!entry.enabled) {
                 entry.enabled = std::any_of(
@@ -199,6 +211,7 @@ public:
                         return enabled.contains(legacyId);
                     });
             }
+            entry.saved = entry.saved || entry.enabled;
             entries.append(std::move(entry));
         }
     }
@@ -223,7 +236,7 @@ public:
             return GameModIconWithStatus(baseIcon(index.row()), active);
         }
         case Qt::CheckStateRole:
-            return entry.enabled ? Qt::Checked : Qt::Unchecked;
+            return entry.saved ? Qt::Checked : Qt::Unchecked;
         case Qt::SizeHintRole:
             return QSize(154, 94);
         case Qt::TextAlignmentRole:
@@ -248,6 +261,8 @@ public:
             return entry.service.category;
         case ProfileIdRole:
             return entry.profileId;
+        case ActiveRole:
+            return entry.enabled;
         case BaseIconRole:
             return baseIcon(index.row());
         case DisplayNameRole:
@@ -265,12 +280,27 @@ public:
             return false;
         auto &entry = entries[index.row()];
         if (role == Qt::CheckStateRole) {
-            const bool enabled = value.toInt() == Qt::Checked;
+            const bool saved = value.toInt() == Qt::Checked;
+            if (entry.saved == saved)
+                return false;
+            entry.saved = saved;
+            // Adding from the library keeps the familiar behavior of making
+            // the service active immediately. Removing also stops routing it.
+            entry.enabled = saved;
+            emit dataChanged(index, index,
+                             {Qt::CheckStateRole, ActiveRole,
+                              Qt::DecorationRole});
+            return true;
+        }
+        if (role == ActiveRole) {
+            const bool enabled = value.toBool();
             if (entry.enabled == enabled)
                 return false;
             entry.enabled = enabled;
+            entry.saved = entry.saved || enabled;
             emit dataChanged(index, index,
-                             {Qt::CheckStateRole, Qt::DecorationRole});
+                             {Qt::CheckStateRole, ActiveRole,
+                              Qt::DecorationRole});
             return true;
         }
         if (role == ProfileIdRole) {
@@ -297,18 +327,34 @@ public:
                              [](const auto &entry) { return entry.enabled; });
     }
 
+    int savedCount() const {
+        return std::count_if(entries.cbegin(), entries.cend(),
+                             [](const auto &entry) { return entry.saved; });
+    }
+
     void setRowsChecked(const QList<int> &rows, bool checked) {
         bool changed = false;
         for (const auto row : rows) {
             if (row < 0 || row >= entries.size() ||
-                entries[row].enabled == checked)
+                entries[row].saved == checked)
                 continue;
+            entries[row].saved = checked;
             entries[row].enabled = checked;
             changed = true;
         }
         if (changed && !entries.isEmpty())
             emit dataChanged(index(0), index(entries.size() - 1),
-                             {Qt::CheckStateRole, Qt::DecorationRole});
+                             {Qt::CheckStateRole, ActiveRole,
+                              Qt::DecorationRole});
+    }
+
+    QStringList savedServiceIds() const {
+        QStringList result;
+        for (const auto &entry : entries) {
+            if (entry.saved)
+                result.append(entry.service.id);
+        }
+        return result;
     }
 
     QStringList enabledServiceIds() const {
@@ -517,9 +563,9 @@ void DialogManageRoutes::setupGameModTab() {
     layout->addWidget(title);
 
     auto *description = new QLabel(
-        tr("Choose which games and services should use the proxy. "
-           "Checked services add their optimized process, domain, address, "
-           "and port rules before the current routing profile."),
+        tr("Add games and services to Enabled now, then choose which ones are "
+           "active. Paused services keep their server and settings without "
+           "adding routing rules."),
         gameModTab);
     description->setWordWrap(true);
     description->setTextInteractionFlags(Qt::TextSelectableByMouse);
@@ -541,7 +587,7 @@ void DialogManageRoutes::setupGameModTab() {
     enabledPageLayout->setContentsMargins(10, 12, 10, 10);
     enabledPageLayout->setSpacing(8);
     auto *enabledHint = new QLabel(
-        tr("Ping, change the server, or remove an enabled service."),
+        tr("Pause routing, test ping, change the server, or remove a saved service."),
         enabledPage);
     enabledHint->setWordWrap(true);
     enabledPageLayout->addWidget(enabledHint);
@@ -553,7 +599,7 @@ void DialogManageRoutes::setupGameModTab() {
     gameModEnabledServices->setMovement(QListView::Static);
     gameModEnabledServices->setWrapping(true);
     gameModEnabledServices->setSelectionMode(QAbstractItemView::NoSelection);
-    gameModEnabledServices->setGridSize(QSize(390, 122));
+    gameModEnabledServices->setGridSize(QSize(430, 122));
     gameModEnabledServices->setSpacing(8);
     gameModEnabledServices->setVerticalScrollMode(
         QAbstractItemView::ScrollPerPixel);
@@ -576,8 +622,8 @@ void DialogManageRoutes::setupGameModTab() {
 
     gameModCategory = new QListWidget(gameModTab);
     gameModCategory->setObjectName(QStringLiteral("game_mod_category"));
-    gameModSelectVisible = new QPushButton(tr("Enable shown"), gameModTab);
-    gameModClearVisible = new QPushButton(tr("Disable shown"), gameModTab);
+    gameModSelectVisible = new QPushButton(tr("Add shown"), gameModTab);
+    gameModClearVisible = new QPushButton(tr("Remove shown"), gameModTab);
     gameModSelectVisible->setObjectName(QStringLiteral("game_mod_enable_shown"));
     gameModClearVisible->setObjectName(QStringLiteral("game_mod_disable_shown"));
     toolbar->addWidget(gameModSelectVisible);
@@ -636,6 +682,9 @@ void DialogManageRoutes::setupGameModTab() {
     QSet<QString> enabled(
         Configs::dataStore->routing->game_mod_enabled_services.cbegin(),
         Configs::dataStore->routing->game_mod_enabled_services.cend());
+    QSet<QString> saved(
+        Configs::dataStore->routing->game_mod_saved_services.cbegin(),
+        Configs::dataStore->routing->game_mod_saved_services.cend());
     QSet<QString> availableServiceIds;
     for (const auto &service : services) {
         availableServiceIds.insert(service.id);
@@ -643,6 +692,10 @@ void DialogManageRoutes::setupGameModTab() {
             availableServiceIds.insert(legacyId);
     }
     enabled.intersect(availableServiceIds);
+    saved.intersect(availableServiceIds);
+    // Existing installations only have the active list. Treat those entries
+    // as saved during the one-time migration to the two-state model.
+    saved.unite(enabled);
     const auto profileAssignments = ParseGameModProfileAssignments(
         Configs::dataStore->routing->game_mod_service_profiles);
 
@@ -669,7 +722,7 @@ void DialogManageRoutes::setupGameModTab() {
               });
 
     gameModServiceModel = new GameModServiceModel(
-        services, atlas, enabled, profileAssignments, this);
+        services, atlas, saved, enabled, profileAssignments, this);
     gameModServiceProxy = new GameModFilterProxyModel(this);
     gameModServiceProxy->setSourceModel(gameModServiceModel);
     gameModServiceProxy->sort(0, Qt::AscendingOrder);
@@ -731,8 +784,9 @@ void DialogManageRoutes::updateGameModSummary(bool refreshEnabled) {
     if (gameModServiceModel == nullptr || gameModServiceProxy == nullptr)
         return;
     gameModSummary->setText(
-        tr("%1 enabled  |  %2 shown of %3 services")
+        tr("%1 active  |  %2 saved  |  %3 shown of %4 services")
             .arg(gameModServiceModel->enabledCount())
+            .arg(gameModServiceModel->savedCount())
             .arg(gameModServiceProxy->rowCount())
             .arg(gameModServiceModel->rowCount()));
     gameModServices->viewport()->update();
@@ -747,14 +801,15 @@ void DialogManageRoutes::refreshGameModEnabledServices() {
             gameModServiceModel->index(row, 0);
         if (sourceIndex.data(Qt::CheckStateRole).toInt() != Qt::Checked)
             continue;
+        const bool serviceEnabled = sourceIndex.data(ActiveRole).toBool();
         const auto configuredProfile = sourceIndex.data(ProfileIdRole).toInt();
         const auto resolvedProfile = configuredProfile >= 0
                                          ? configuredProfile
                                          : Configs::dataStore->started_id;
-        const bool active = resolvedProfile >= 0 &&
+        const bool active = serviceEnabled && resolvedProfile >= 0 &&
                             resolvedProfile == Configs::dataStore->started_id;
         auto *item = new QListWidgetItem(gameModEnabledServices);
-        item->setSizeHint(QSize(374, 112));
+        item->setSizeHint(QSize(414, 112));
         auto *rowWidget = new QWidget(gameModEnabledServices);
         rowWidget->setObjectName(QStringLiteral("game_mod_enabled_card"));
         auto *rowLayout = new QHBoxLayout(rowWidget);
@@ -782,12 +837,19 @@ void DialogManageRoutes::refreshGameModEnabledServices() {
         const auto profileIndex = profileCombo->findData(configuredProfile);
         profileCombo->setCurrentIndex(profileIndex >= 0 ? profileIndex : 0);
         content->addWidget(profileCombo);
-        auto *status = new QLabel(
+        auto statusText =
             resolvedProfile >= 0 ? GameModProfileLabel(resolvedProfile, true)
-                                 : tr("No active configuration"),
-            rowWidget);
+                                 : tr("No active configuration");
+        if (!serviceEnabled)
+            statusText = tr("Paused") + QStringLiteral("  ·  ") + statusText;
+        auto *status = new QLabel(statusText, rowWidget);
         content->addWidget(status);
         rowLayout->addLayout(content, 1);
+        auto *activeToggle = new QCheckBox(tr("Active"), rowWidget);
+        activeToggle->setChecked(serviceEnabled);
+        activeToggle->setToolTip(
+            tr("Pause routing without removing this saved service"));
+        rowLayout->addWidget(activeToggle);
         auto *ping = new QToolButton(rowWidget);
         ping->setText(tr("Ping"));
         ping->setToolTip(tr("Test this server now"));
@@ -796,7 +858,7 @@ void DialogManageRoutes::refreshGameModEnabledServices() {
         auto *remove = new QToolButton(rowWidget);
         remove->setIcon(style()->standardIcon(QStyle::SP_TitleBarCloseButton));
         remove->setAutoRaise(true);
-        remove->setToolTip(tr("Remove from enabled services"));
+        remove->setToolTip(tr("Remove this saved service"));
         rowLayout->addWidget(remove);
         gameModEnabledServices->setItemWidget(item, rowWidget);
 
@@ -808,6 +870,16 @@ void DialogManageRoutes::refreshGameModEnabledServices() {
                         if (sourceIndex.isValid())
                             gameModServiceModel->setData(sourceIndex, profileId,
                                                          ProfileIdRole);
+                    });
+                });
+        connect(activeToggle, STATE_CHANGED, this,
+                [this, sourceIndex](int state) {
+                    const bool enabled = state == Qt::Checked;
+                    QTimer::singleShot(0, this,
+                                       [this, sourceIndex, enabled] {
+                        if (sourceIndex.isValid())
+                            gameModServiceModel->setData(
+                                sourceIndex, enabled, ActiveRole);
                     });
                 });
         connect(remove, &QToolButton::clicked, this, [this, sourceIndex] {
@@ -849,7 +921,7 @@ void DialogManageRoutes::refreshGameModEnabledServices() {
                 });
     }
     if (gameModEnabledServices->count() == 0) {
-        auto *empty = new QListWidgetItem(tr("No services enabled"),
+        auto *empty = new QListWidgetItem(tr("No saved services"),
                                           gameModEnabledServices);
         empty->setFlags(Qt::NoItemFlags);
     }
@@ -1231,6 +1303,8 @@ void DialogManageRoutes::accept() {
 
     Configs::dataStore->routing->game_mod_enabled_services =
         gameModServiceModel->enabledServiceIds();
+    Configs::dataStore->routing->game_mod_saved_services =
+        gameModServiceModel->savedServiceIds();
     Configs::dataStore->routing->game_mod_service_profiles =
         QString::fromUtf8(QJsonDocument(gameModServiceModel->profileAssignments()).toJson(
             QJsonDocument::Compact));

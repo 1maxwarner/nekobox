@@ -77,8 +77,11 @@ namespace Configs {
         int sniffing_mode = Configs::SniffingMode::FOR_ROUTING;
         int ruleset_mirror = Configs::Mirrors::CLOUDFLARE;
 
-        // Services selected in the visual Game Mod routing catalog.
+        // Services currently active in Game Mod routing.
         QStringList game_mod_enabled_services = {};
+        // Services kept on the "Enabled now" screen. A saved service can be
+        // paused without losing its assigned profile or leaving that screen.
+        QStringList game_mod_saved_services = {};
         // JSON object: service id -> proxy profile id. Missing/-1 inherits the
         // currently active configuration.
         QString game_mod_service_profiles = "{}";

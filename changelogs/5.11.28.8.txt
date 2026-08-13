@@ -1,0 +1,6 @@
+- feat: separate saved Game Mod services from active routing with a per-service pause switch
+- feat: keep paused services, assigned servers, ping controls, and settings on the Enabled now screen
+- fix: keep library checkboxes removable after adding a service and make bulk actions explicitly add or remove saved services
+- fix: replace every displayed hash name with the exact service name tied to the same ExitLag memory owner
+- perf: merge newly resolved duplicate applications while preserving legacy service IDs and routing settings
+- i18n: translate the new saved, active, paused, add, and remove states into Russian

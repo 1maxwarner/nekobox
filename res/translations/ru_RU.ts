@@ -2145,8 +2145,8 @@ Are you sure?</source>
         <translation>Игровой режим</translation>
     </message>
     <message>
-        <source>Choose which games and services should use the proxy. Checked services add their optimized process, domain, address, and port rules before the current routing profile.</source>
-        <translation>Выберите игры и сервисы, которые должны использовать прокси. Для отмеченных сервисов оптимизированные правила процессов, доменов, адресов и портов применяются раньше правил текущего профиля маршрутизации.</translation>
+        <source>Add games and services to Enabled now, then choose which ones are active. Paused services keep their server and settings without adding routing rules.</source>
+        <translation>Добавьте игры и сервисы в раздел «Сейчас включено», затем выберите активные. Приостановленные сервисы сохраняют сервер и настройки, но не добавляют правила маршрутизации.</translation>
     </message>
     <message>
         <source>Search by service, alias, domain, or executable</source>
@@ -2158,12 +2158,12 @@ Are you sure?</source>
     </message>
     <message><source>Categories</source><translation>Категории</translation></message>
     <message>
-        <source>Enable shown</source>
-        <translation>Включить показанные</translation>
+        <source>Add shown</source>
+        <translation>Добавить показанные</translation>
     </message>
     <message>
-        <source>Disable shown</source>
-        <translation>Выключить показанные</translation>
+        <source>Remove shown</source>
+        <translation>Убрать показанные</translation>
     </message>
     <message>
         <source>Service</source>
@@ -2186,8 +2186,8 @@ Are you sure?</source>
         <translation>Библиотека</translation>
     </message>
     <message>
-        <source>Ping, change the server, or remove an enabled service.</source>
-        <translation>Проверьте пинг, смените сервер или уберите включённый сервис.</translation>
+        <source>Pause routing, test ping, change the server, or remove a saved service.</source>
+        <translation>Приостановите маршрутизацию, проверьте пинг, смените сервер или удалите сохранённый сервис.</translation>
     </message>
     <message>
         <source>Selected services and their assigned configurations</source>
@@ -2222,18 +2222,21 @@ Domains: %4</source>
         <translation>Сервисы для игрового режима не найдены</translation>
     </message>
     <message>
-        <source>%1 enabled  |  %2 shown of %3 services</source>
-        <translation>Включено: %1  |  показано: %2 из %3</translation>
+        <source>%1 active  |  %2 saved  |  %3 shown of %4 services</source>
+        <translation>Активно: %1  |  сохранено: %2  |  показано: %3 из %4</translation>
     </message>
     <message>
-        <source>No services enabled</source>
-        <translation>Нет включённых сервисов</translation>
+        <source>No saved services</source>
+        <translation>Нет сохранённых сервисов</translation>
     </message>
     <message><source>No active configuration</source><translation>Нет активной конфигурации</translation></message>
     <message><source>Ping</source><translation>Пинг</translation></message>
     <message><source>Test this server now</source><translation>Проверить этот сервер сейчас</translation></message>
     <message><source>Testing…</source><translation>Проверка…</translation></message>
-    <message><source>Remove from enabled services</source><translation>Убрать из включённых сервисов</translation></message>
+    <message><source>Active</source><translation>Активен</translation></message>
+    <message><source>Paused</source><translation>Приостановлен</translation></message>
+    <message><source>Pause routing without removing this saved service</source><translation>Приостановить маршрутизацию, не удаляя сохранённый сервис</translation></message>
+    <message><source>Remove this saved service</source><translation>Удалить этот сохранённый сервис</translation></message>
     <message>
         <source>Ping unavailable</source>
         <translation>пинг недоступен</translation>
