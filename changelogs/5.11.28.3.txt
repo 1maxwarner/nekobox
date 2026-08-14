@@ -1,3 +1,3 @@
-- feat: add Game Mod service routing with search, icons and persistent checkboxes
-- feat: generate optimized proxy and direct rules for 810 games and services
-- feat: package the compact Game Mod catalog and icon atlas with every build
+- fix: route AmneziaWG userspace UDP sessions through the virtual AWG address with an ephemeral local port
+- fix: prevent Discord voice UDP flows from colliding with `port is in use` and hanging at RTC Connecting
+- test: add an AmneziaWG netstack regression test for IPv4 and IPv6 UDP source binding
