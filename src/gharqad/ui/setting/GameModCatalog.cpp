@@ -6,6 +6,7 @@
 #include <QJsonObject>
 #include <QJsonParseError>
 #include <QObject>
+#include <QRegularExpression>
 #include <QSet>
 
 #include <nekobox/sys/Settings.h>
@@ -51,6 +52,40 @@ QStringList StringArray(const QJsonArray &array) {
         const auto text = value.toString();
         if (!text.isEmpty())
             result.append(text);
+    }
+    return result;
+}
+
+QString CaseInsensitiveProcessPathPattern(const QString &processName) {
+    // sing-box compares process_name literally. ProcessPathRegex is based on
+    // the same discovered process path, but supports RE2's inline (?i) flag.
+    // Match the executable basename so a Windows path using either slash is
+    // accepted, regardless of the casing reported by the operating system.
+    QString pattern = QStringLiteral("(?i)(?:^|.*[\\\\/])");
+    for (const auto character : processName) {
+        if (character == QLatin1Char('*')) {
+            pattern += QStringLiteral(".*");
+        } else if (character == QLatin1Char('?')) {
+            pattern += QLatin1Char('.');
+        } else {
+            pattern += QRegularExpression::escape(QString(character));
+        }
+    }
+    return pattern + QLatin1Char('$');
+}
+
+QJsonArray CaseInsensitiveProcessPathPatterns(const QJsonArray &processNames) {
+    QJsonArray result;
+    QSet<QString> seen;
+    for (const auto &value : processNames) {
+        const auto processName = value.toString().trimmed();
+        if (processName.isEmpty())
+            continue;
+        const auto pattern = CaseInsensitiveProcessPathPattern(processName);
+        if (!seen.contains(pattern)) {
+            seen.insert(pattern);
+            result.append(pattern);
+        }
     }
     return result;
 }
@@ -141,6 +176,16 @@ QJsonArray BuildRules(const QStringList &enabledServiceIds,
         for (const auto &ruleValue : service.value(QStringLiteral("rules")).toArray()) {
             auto rule = ruleValue.toObject();
             rule.remove(QStringLiteral("catalog_source"));
+            const auto processNames = rule.value(QStringLiteral("process_name")).toArray();
+            if (!processNames.isEmpty()) {
+                // The catalog keeps the canonical executable names for search
+                // and display. At runtime emit a case-insensitive basename
+                // matcher, so telegram.exe also catches Telegram.exe,
+                // TELEGRAM.EXE, and every other casing.
+                rule.remove(QStringLiteral("process_name"));
+                rule.insert(QStringLiteral("process_path_regex"),
+                            CaseInsensitiveProcessPathPatterns(processNames));
+            }
             if (rule.value(QStringLiteral("outbound")).toString() == QStringLiteral("proxy")) {
                 auto outbound = serviceOutbounds.value(serviceId);
                 if (outbound.isEmpty())

@@ -29,6 +29,14 @@ PROFILE_ALIASES = {
     "the division 2": {"thedivision2.exe"},
 }
 
+# Alternate clients that share the same routing endpoints as the primary
+# application. They are added to the service rule as well as its search data.
+SERVICE_PROCESS_ALIASES = {
+    "telegram": {
+        "telegram.exe": {"AyuGram.exe"},
+    },
+}
+
 DISPLAY_NAMES = {
     "adobe": "Adobe",
     "chatgpt": "ChatGPT",
@@ -484,6 +492,28 @@ def convert_rule(route: dict[str, Any], definitions: dict[str, list[str]]) -> di
     return result
 
 
+def add_service_process_aliases(
+    service_name: str, rules: list[dict[str, Any]], keywords: list[str]
+) -> None:
+    aliases = SERVICE_PROCESS_ALIASES.get(normalized(service_name), {})
+    if not aliases:
+        return
+
+    keywords.extend(alias for values in aliases.values() for alias in values)
+    for rule in rules:
+        processes = rule.get("process_name")
+        if not isinstance(processes, list):
+            continue
+        additions = [
+            alias
+            for original, values in aliases.items()
+            if any(value.casefold() == original for value in processes)
+            for alias in values
+        ]
+        if additions:
+            rule["process_name"] = unique(processes + additions)
+
+
 def load_json(path: Path) -> Any:
     return json.loads(path.read_text(encoding="utf-8-sig"))
 
@@ -622,6 +652,8 @@ def build(
                 converted = convert_rule(route, definitions)
                 if converted is not None and converted not in rules:
                     rules.append(converted)
+
+        add_service_process_aliases(application["name"], rules, keywords)
 
         if not rules:
             continue

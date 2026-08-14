@@ -1,0 +1,2 @@
+- fix: Game Mod now matches process executable names without regard to letter case
+- feat: route AyuGram.exe through the Telegram Game Mod service
