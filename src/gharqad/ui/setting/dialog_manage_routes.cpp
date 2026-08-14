@@ -1387,13 +1387,34 @@ void DialogManageRoutes::accept() {
     Configs::dataStore->routing->dns_final_out_direct = ui->dns_final_out->currentIndex() == 1;
     Configs::dataStore->fake_dns = ui->enable_fakeip->isChecked();
 
+    const auto gameModEnabledServices = gameModServiceModel->enabledServiceIds();
+    const bool shouldSwitchDefaultRouteForGameMod =
+        Configs::dataStore->routing->game_mod_enabled_services.isEmpty() &&
+        !gameModEnabledServices.isEmpty() &&
+        !Configs::dataStore->routing->game_mod_default_direct_applied;
+
     Configs::dataStore->routing->game_mod_enabled_services =
-        gameModServiceModel->enabledServiceIds();
+        gameModEnabledServices;
     Configs::dataStore->routing->game_mod_saved_services =
         gameModServiceModel->savedServiceIds();
     Configs::dataStore->routing->game_mod_service_profiles =
         QString::fromUtf8(QJsonDocument(gameModServiceModel->profileAssignments()).toJson(
             QJsonDocument::Compact));
+
+    if (shouldSwitchDefaultRouteForGameMod) {
+        const auto defaultRoute = std::find_if(
+            chainList.cbegin(), chainList.cend(), [](const auto &route) {
+                return route != nullptr &&
+                       route->chain_name.compare(QStringLiteral("Default"),
+                                                 Qt::CaseInsensitive) == 0;
+            });
+        if (defaultRoute != chainList.cend()) {
+            // This is deliberately a one-time migration. Once the user edits
+            // Default back to proxy, Game Mod will never overwrite it again.
+            (*defaultRoute)->defaultOutboundID = Configs::directID;
+            Configs::dataStore->routing->game_mod_default_direct_applied = true;
+        }
+    }
 
     Configs::profileManager->UpdateRouteChains(chainList);
     Configs::dataStore->routing->current_route_id = currentRoute->id;

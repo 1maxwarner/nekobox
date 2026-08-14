@@ -7,7 +7,7 @@ if (first_start){
     );
 
     if (index == 1){
-        open_url("https://github.com/qr243vbi/nekobox");
+        open_url("https://github.com/1maxwarner/nekobox");
     } else if (index == 2){
         open_url("https://matrix.to/#/#NyameBox:matrix.org");
     }

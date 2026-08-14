@@ -4,4 +4,9 @@
 - fix: export AWG s3/s4 with their own values, keep the AWG local address
 - fix: aim the live speed test at the profile too, drop the test panics
 - fix: aim the live URL test at the profile, not route.final
-- fix: AppRun missing shebang in Linux AppImage builds
+- feat: release the complete Game Mod library with service categories, smart search, per-service profiles and merged OpenCCK routes
+- fix: match Game Mod executable names without regard to letter case and route AyuGram through Telegram
+- feat: check and download application updates from 1maxwarner/nekobox
+- defaults: update imported subscriptions every hour and start the Default route at priority 1 with proxy as its final outbound
+- routing: the first Game Mod activation switches Default to direct once; later user changes are preserved
+- build: make Linux artifact downloads resilient and prevent binary jobs from racing the shared source upload

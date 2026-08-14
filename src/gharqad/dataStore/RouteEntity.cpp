@@ -695,6 +695,8 @@ namespace Configs {
         auto defaultChain = std::make_shared<RoutingChain>();
         defaultChain->chain_name = "Default";
         defaultChain->update_url = "";
+        defaultChain->priority = 1;
+        defaultChain->defaultOutboundID = proxyID;
         auto defaultRule = std::make_shared<RouteRule>();
         defaultRule->name = "Route DNS";
         defaultRule->action = "hijack-dns";

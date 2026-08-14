@@ -85,6 +85,9 @@ namespace Configs {
         // JSON object: service id -> proxy profile id. Missing/-1 inherits the
         // currently active configuration.
         QString game_mod_service_profiles = "{}";
+        // Set after Game Mod performs its one-time default-route switch. This
+        // preserves any later default-outbound choice made by the user.
+        bool game_mod_default_direct_applied = false;
 
         std::shared_ptr<TunSplit> tun_split = std::make_shared<TunSplit>();
 
@@ -223,7 +226,7 @@ namespace Configs {
         QString http_header_accept_encoding = "";
         QString http_header_accept = "";
         bool sub_clear = false;
-        int sub_auto_update = -30;
+        int sub_auto_update = 60;
         bool sub_send_hwid = false;
         bool sub_rm_unavailable = false;
         bool sub_rm_duplicates = false;

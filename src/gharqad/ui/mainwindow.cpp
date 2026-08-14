@@ -5278,7 +5278,7 @@ skip1:
   }
   {
     auto resp = NetworkRequestHelper::HttpGet(
-        "https://api.github.com/repos/qr243vbi/nekobox/releases");
+        "https://api.github.com/repos/1maxwarner/nekobox/releases");
     if (!resp.error.isEmpty()) {
       runOnUiThread([=, this] {
         MessageBoxWarning(QObject::tr("Update"),
