@@ -464,7 +464,9 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          mapfile -d '' release_files < <(find ./deployment -maxdepth 1 -type f -print0)
+          # The source job owns the shared source archive. Binary jobs may
+          # download it as an input artifact, but must not race to replace it.
+          mapfile -d '' release_files < <(find ./deployment -maxdepth 1 -type f ! -name 'nekobox-unified-source-*' -print0)
           if [[ ${#release_files[@]} -eq 0 ]]; then
             echo "No release files found in deployment" >&2
             exit 1
@@ -595,7 +597,9 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          mapfile -d '' release_files < <(find ./deployment -maxdepth 1 -type f -print0)
+          # The source job owns the shared source archive. Binary jobs may
+          # download it as an input artifact, but must not race to replace it.
+          mapfile -d '' release_files < <(find ./deployment -maxdepth 1 -type f ! -name 'nekobox-unified-source-*' -print0)
           if [[ ${#release_files[@]} -eq 0 ]]; then
             echo "No release files found in deployment" >&2
             exit 1
