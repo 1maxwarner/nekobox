@@ -58,6 +58,8 @@ github.com/ebitengine/purego v0.10.0 h1:QIw4xfpWT6GWTzaW5XEKy3HXoqrJGx1ijYHzTF0/
 github.com/ebitengine/purego v0.10.0/go.mod h1:iIjxzd6CiRiOG0UyXP+V1+jWqUXVjPKLAI0mRfJZTmQ=
 github.com/enfein/mieru/v3 v3.30.0 h1:g7v0TuK7y0ZMn6TOdjOs8WEUQk8bvs6WYPBJ16SKdBU=
 github.com/enfein/mieru/v3 v3.30.0/go.mod h1:zJBUCsi5rxyvHM8fjFf+GLaEl4OEjjBXr1s5F6Qd3hM=
+github.com/fabbiodev/nekobox-sing-box-core v0.0.0-20260906180604-c73e4848c6c7 h1:Ymx3c16yk7SDTmzzAx5ACeWQpcF0YiimhtkARfgMv3Y=
+github.com/fabbiodev/nekobox-sing-box-core v0.0.0-20260906180604-c73e4848c6c7/go.mod h1:MgAP6ikc6EDIE/bO+XeXotyf4CUqHeZ0cjD+hZCwLIQ=
 github.com/florianl/go-nfqueue/v2 v2.0.2 h1:FL5lQTeetgpCvac1TRwSfgaXUn0YSO7WzGvWNIp3JPE=
 github.com/florianl/go-nfqueue/v2 v2.0.2/go.mod h1:VA09+iPOT43OMoCKNfXHyzujQUty2xmzyCRkBOlmabc=
 github.com/fsnotify/fsnotify v1.9.0 h1:2Ml+OJNzbYCTzsxtv8vKSFD9PbJjmhYF14k/jKC7S9k=
