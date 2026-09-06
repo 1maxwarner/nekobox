@@ -131,8 +131,8 @@ jobs:
       - get-tag-and-changelog
     env:
       INPUT_VERSION: ${{ needs.get-tag-and-changelog.outputs.tag }}
-      GOPRIVATE: github.com/fabbiodev/nekobox-sing-box-core
-      GONOSUMDB: github.com/fabbiodev/nekobox-sing-box-core
+      GOPRIVATE: github.com/1maxwarner/nekobox-sing-box-core
+      GONOSUMDB: github.com/1maxwarner/nekobox-sing-box-core
     strategy:
       matrix:
         include:
@@ -179,7 +179,7 @@ jobs:
           printf '%s\n' "${CORE_REPO_DEPLOY_KEY}" > "${HOME}/.ssh/id_ed25519"
           chmod 600 "${HOME}/.ssh/id_ed25519"
           ssh-keyscan -t ed25519 github.com >> "${HOME}/.ssh/known_hosts"
-          git config --global url."git@github.com:fabbiodev/nekobox-sing-box-core".insteadOf "https://github.com/fabbiodev/nekobox-sing-box-core"
+          git config --global url."git@github.com:1maxwarner/nekobox-sing-box-core".insteadOf "https://github.com/1maxwarner/nekobox-sing-box-core"
       - name: Install Golang
         if: ( matrix.cross_os == 'public' || ( github.event.inputs.source_only  != 'true' && matrix.allow == 'true' ) ) && steps.cache-common.outputs.cache-hit != 'true'
         uses: actions/setup-go@main
