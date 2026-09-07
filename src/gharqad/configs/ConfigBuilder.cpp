@@ -16,7 +16,6 @@
 #include <QFile>
 #include <QFileInfo>
 #include <QHash>
-#include <QHostAddress>
 #include <QJsonDocument>
 #include <QStandardPaths>
 
@@ -397,15 +396,14 @@ QString getTunName() {
 }
 
 static bool IsPrivateRouteCIDR(const QString &cidr) {
-  const auto address = QHostAddress(cidr.section('/', 0, 0).trimmed());
-  if (address.isNull())
-    return false;
-  return address.isInSubnet(QHostAddress(QStringLiteral("10.0.0.0")), 8) ||
-         address.isInSubnet(QHostAddress(QStringLiteral("172.16.0.0")), 12) ||
-         address.isInSubnet(QHostAddress(QStringLiteral("192.168.0.0")), 16) ||
-         address.isInSubnet(QHostAddress(QStringLiteral("127.0.0.0")), 8) ||
-         address.isInSubnet(QHostAddress(QStringLiteral("fc00::")), 7) ||
-         address.isInSubnet(QHostAddress(QStringLiteral("fe80::")), 10);
+  const auto address = cidr.section('/', 0, 0).trimmed();
+  const auto prefix = cidr.section('/', 1, 1).trimmed();
+  return (address == QStringLiteral("10.0.0.0") && prefix == QStringLiteral("8")) ||
+         (address == QStringLiteral("172.16.0.0") && prefix == QStringLiteral("12")) ||
+         (address == QStringLiteral("192.168.0.0") && prefix == QStringLiteral("16")) ||
+         (address == QStringLiteral("127.0.0.0") && prefix == QStringLiteral("8")) ||
+         (address == QStringLiteral("fc00::") && prefix == QStringLiteral("7")) ||
+         (address == QStringLiteral("fe80::") && prefix == QStringLiteral("10"));
 }
 
 static bool HasProxyPrivateRoute(const std::shared_ptr<RoutingChain> &routeChain) {
