@@ -147,6 +147,7 @@ namespace Configs {
         };
         QString tun_address = "172.19.0.1/24";
         QString tun_address_6 = "fdfe:dcba:9876::1/96";
+        QString tun_name = "Neko TUN";
         #ifdef USE_CPP_PROXY_CONFIGURATOR
         QString proxy_scheme = "{ip}:{port}";
         #else
