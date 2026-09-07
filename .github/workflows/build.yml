@@ -597,12 +597,12 @@ jobs:
       - name: Pack
         shell: bash
         env:
-          GITHUB_TOKEN: ${{ secrets.WINGET_TOKEN }}
+          GITHUB_TOKEN: ${{ github.token }}
           INPUT_VERSION: ${{ needs.get-tag-and-changelog.outputs.tag }}
           EMAIL: ${{ secrets.EMAIL }}
           UPLOAD_WITH_GH: yes
           CHOCOLATEY_API_KEY: ${{ secrets.CHOCOLATEY_API_KEY }}
-          GH_TOKEN: ${{ secrets.WINGET_TOKEN }}
+          GH_TOKEN: ${{ github.token }}
         run: |
           source script/env_deploy.sh
           find . -name artifacts.tgz | xargs -n1 tar xvzf

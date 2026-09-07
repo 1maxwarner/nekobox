@@ -21,7 +21,6 @@
 #include <nekobox/dataStore/ResourceEntity.hpp>
 #include <nekobox/dataStore/Utils.hpp>
 #include <nekobox/global/GuiUtils.hpp>
-#include <nekobox/global/LogRouteHelper.hpp>
 #include <nekobox/global/keyvaluerange.h>
 #include <nekobox/stats/traffic/TrafficLooper.hpp>
 #include <nekobox/sys/AutoRun.hpp>
@@ -80,12 +79,13 @@
 #endif
 
 #include <QClipboard>
+#include <QDateTime>
 #include <QDesktopServices>
 #include <QUrlQuery>
 #include <QDir>
+#include <QFile>
 #include <QFileInfo>
 #include <QInputDialog>
-#include <QSignalBlocker>
 #include <QLabel>
 #include <QMessageBox>
 #include <QScreen>
@@ -317,6 +317,8 @@ void MainWindow::import_route_profile_static( QWidget *widget, QString name, QSt
     QString err;
     QJsonArray array;
     bool skip_update = false;
+    bool enabled = true;
+    int priority = 100;
     int outboundId = proxy ? Configs::proxyID : Configs::directID; 
     auto json = QJsonDocument::fromJson(resp.toUtf8());
     if (json.isObject()){
@@ -325,10 +327,14 @@ void MainWindow::import_route_profile_static( QWidget *widget, QString name, QSt
       auto json_proxy = object["proxy"];
       auto json_array = object["rules"];
       auto json_url = object["url"];
-      auto skip_update = object["skip_update"];
-      if (skip_update.isBool()){
-        skip_update = skip_update.toBool();
+      const auto json_skip_update = object["skip_update"];
+      if (json_skip_update.isBool()){
+        skip_update = json_skip_update.toBool();
       }
+      if (object["enabled"].isBool())
+        enabled = object["enabled"].toBool();
+      if (object["priority"].isDouble())
+        priority = object["priority"].toInt();
       if (json_name.isString()){
         name = json_name.toString();
       }
@@ -375,6 +381,8 @@ void MainWindow::import_route_profile_static( QWidget *widget, QString name, QSt
     chain->Rules.clear();
     chain->Rules << parsed;
     chain->skip_update = skip_update;
+    chain->enabled = enabled;
+    chain->priority = priority;
     Configs::profileManager->AddRouteChain(chain);
 }
 
@@ -746,13 +754,13 @@ MainWindow::MainWindow(QWidget *parent)
   //
 
 #ifdef Q_OS_MACOS
-  goto disrespect_mac_users;
+  constexpr bool isMacOS = true;
+#else
+  const bool isMacOS = QOperatingSystemVersion::currentType() ==
+                       QOperatingSystemVersion::MacOS;
 #endif
-
-  if (QOperatingSystemVersion::currentType() ==
-    QOperatingSystemVersion::MacOS) {
+  if (isMacOS) {
     // Running on macOS
-    disrespect_mac_users:
     QMessageBox::warning(this, "Iblis The Master",
                          tr("Using on macOS is not permitted"));
     return;
@@ -909,22 +917,10 @@ MainWindow::MainWindow(QWidget *parent)
   logAutoScrollCheckBox =
       new QCheckBox(tr("Auto-scroll log"), ui->stats_widget);
   logAutoScrollCheckBox->setChecked(Configs::windowSettings->auto_scroll_log);
-
-  logErrorsOnlyCheckBox = new QCheckBox(tr("Errors only"), ui->stats_widget);
-  logErrorsOnlyCheckBox->setChecked(false);
-
-  auto *logCorner = new QWidget(ui->stats_widget);
-  auto *logCornerLayout = new QHBoxLayout(logCorner);
-  logCornerLayout->setContentsMargins(0, 0, 4, 0);
-  logCornerLayout->setSpacing(8);
-  logCornerLayout->addWidget(logErrorsOnlyCheckBox);
-  logCornerLayout->addWidget(logAutoScrollCheckBox);
-  ui->stats_widget->setCornerWidget(logCorner, Qt::TopRightCorner);
-
-  auto updateLogCornerVisibility = [=, this]() {
-    const bool onLogs = ui->stats_widget->currentWidget() == ui->Logs;
-    logAutoScrollCheckBox->setVisible(onLogs);
-    logErrorsOnlyCheckBox->setVisible(onLogs);
+  ui->stats_widget->setCornerWidget(logAutoScrollCheckBox, Qt::TopRightCorner);
+  auto updateAutoScrollVisibility = [=, this]() {
+    logAutoScrollCheckBox->setVisible(ui->stats_widget->currentWidget() ==
+                                      ui->Logs);
   };
   layout->addWidget(searchButton);
   layout->addWidget(filterButton);
@@ -933,9 +929,9 @@ MainWindow::MainWindow(QWidget *parent)
   connect(filterButton, &QPushButton::clicked, this, &MainWindow::on_menu_toggle_filter_triggered);
   connect(searchButton, &QPushButton::clicked, this, &MainWindow::on_menu_toggle_searchbox_triggered);
 
-  updateLogCornerVisibility();
+  updateAutoScrollVisibility();
   connect(ui->stats_widget, &QTabWidget::currentChanged, this,
-          [=](int) { updateLogCornerVisibility(); });
+          [=](int) { updateAutoScrollVisibility(); });
   connect(logAutoScrollCheckBox, &QCheckBox::toggled, this,
           [=, this](bool checked) {
             Configs::windowSettings->auto_scroll_log = checked;
@@ -944,14 +940,11 @@ MainWindow::MainWindow(QWidget *parent)
               bar->setValue(bar->maximum());
             }
           });
-  connect(logErrorsOnlyCheckBox, &QCheckBox::toggled, this,
-          [=, this](bool checked) {
-            logErrorsOnlyFilter = checked;
-            rebuildLogView();
-          });
   MW_show_log = [=, this](const QString &log) {
     runOnUiThread([=, this] { show_log_impl(log); });
   };
+  MW_show_log(QStringLiteral("[Startup] NekoBox %1 started")
+                  .arg(QString::fromUtf8(NKR_VERSION)));
 
   // Listen port if random
   if (Configs::dataStore->random_inbound_port) {
@@ -1497,6 +1490,24 @@ skip_updater_hide:
         },
         Qt::SingleShotConnection);
 
+    auto *actionGameMod = new QAction(ui->menuRouting_Menu);
+    actionGameMod->setText(tr("Game Mod"));
+    ui->menuRouting_Menu->addAction(actionGameMod);
+    connect(
+        actionGameMod, &QAction::triggered, this,
+        [this]() {
+          if (dialog_is_using)
+            return;
+          dialog_is_using = true;
+          auto dialog = new DialogManageRoutes(this, false, true);
+          connect(dialog, &QDialog::finished, this, [=, this] {
+            dialog->deleteLater();
+            dialog_is_using = false;
+          });
+          dialog->show();
+        },
+        Qt::SingleShotConnection);
+
     ui->menuRouting_Menu->addSeparator();
     // ui->menuRouting_Menu->addAction(ui->menu_routing_settings);
 
@@ -1693,13 +1704,16 @@ skip_updater_hide:
     mu_remoteRouteProfiles.unlock();
 
     ui->menuRouting_Menu->addSeparator();
-    for (const auto &route : Configs::profileManager->routes) {
+    for (const auto &route :
+         Configs::profileManager->GetEnabledRouteChains()) {
       auto *action = new QAction(ui->menuRouting_Menu);
-      action->setText(route.second->chain_name);
-      action->setData(route.second->id);
+      action->setText(QStringLiteral("%1  ·  %2")
+                          .arg(route->priority)
+                          .arg(route->chain_name));
+      action->setData(route->id);
       action->setCheckable(true);
       action->setChecked(Configs::dataStore->routing->current_route_id ==
-                         route.first);
+                         route->id);
       connect(action, &QAction::triggered, this, [=, this]() {
         CHECK_ACTION_ACCESS_W
         auto routeID = action->data().toInt();
@@ -1851,7 +1865,7 @@ skip_updater_hide:
     hide();
   }
 #ifndef SKIP_UPDATE_BUTTON
-  if (Configs::windowSettings->startup_update == true) {
+  if (Configs::windowSettings->startup_update) {
     runOnNewThread([=, this] { CheckUpdate(); });
   }
 #endif
@@ -4389,51 +4403,36 @@ inline void FastAppendTextDocument(const QString &message, QTextDocument *doc) {
   cursor.endEditBlock();
 }
 
-void MainWindow::rebuildLogView() {
-  logLock.lock();
-  qvLogDocument->clear();
-  QStringList visibleLines;
-  for (const auto &entry : logLineBuffer) {
-    if (!logErrorsOnlyFilter || entry.isError) {
-      visibleLines << entry.text;
-    }
-  }
-  if (!visibleLines.isEmpty()) {
-    FastAppendTextDocument(visibleLines.join('\n'), qvLogDocument);
-    if (Configs::windowSettings->auto_scroll_log) {
-      auto bar = ui->masterLogBrowser->verticalScrollBar();
-      bar->setValue(bar->maximum());
-    }
-  }
-  logLock.unlock();
-}
+namespace {
+void AppendPersistentLog(const QString &message) {
+  if (message.isEmpty())
+    return;
 
-void MainWindow::addLogDomainToRoute(const QString &domain,
-                                     Configs::simpleAction action,
-                                     const QString &matchType) {
-  const QString err = LogRoute::addDomainToRoute(domain, action, matchType);
-  if (!err.isEmpty()) {
-    MessageBoxWarning(tr("Route"), err);
+  constexpr qint64 MaxLogSize = 4 * 1024 * 1024;
+  const auto path = QDir::current().filePath("nekobox.log");
+  const QFileInfo info(path);
+  if (info.exists() && info.size() >= MaxLogSize) {
+    QFile::remove(path + ".2");
+    if (QFile::exists(path + ".1"))
+      QFile::rename(path + ".1", path + ".2");
+    QFile::rename(path, path + ".1");
+  }
+
+  QFile file(path);
+  if (!file.open(QIODevice::WriteOnly | QIODevice::Append |
+                 QIODevice::Text)) {
     return;
   }
-
-  QString matchLabel = tr("suffix");
-  if (matchType == "domain") {
-    matchLabel = tr("domain");
-  } else if (matchType == "keyword") {
-    matchLabel = tr("keyword");
-  }
-
-  MW_show_log(tr("[Route] Added %1:%2 → %3")
-                  .arg(matchLabel, domain, LogRoute::simpleActionLabel(action)));
-  MW_dialog_message("", "UpdateDataStore,RouteChanged");
+  const auto record =
+      QStringLiteral("[%1] %2\n")
+          .arg(QDateTime::currentDateTime().toString(Qt::ISODateWithMs),
+               message)
+          .toUtf8();
+  file.write(record);
 }
+} // namespace
 
 void MainWindow::show_log_impl(const QString &log) {
-  if (!Configs::windowSettings->logs_enabled) {
-    return;
-  }
-
   logLock.lock();
 
   QString trimmed;
@@ -4442,13 +4441,13 @@ void MainWindow::show_log_impl(const QString &log) {
   } else {
     trimmed = sanitizeLog(log).trimmed();
   }
-
-  if (trimmed.isEmpty()) {
+  AppendPersistentLog(trimmed);
+  if (!Configs::windowSettings->logs_enabled) {
     logLock.unlock();
     return;
   }
-
   int blockCount = qvLogDocument->blockCount();
+  // Check the number of blocks
   if (logClear) {
     if (blockCount > 300) {
       QTextBlock currentBlock = qvLogDocument->begin();
@@ -4468,37 +4467,18 @@ void MainWindow::show_log_impl(const QString &log) {
     }
   }
 
-  QStringList linesToShow;
-  const auto lines = trimmed.split('\n');
-  for (const QString &line : lines) {
-    const QString cleanLine = line.trimmed();
-    if (cleanLine.isEmpty()) {
-      continue;
-    }
-
-    LogLineEntry entry;
-    entry.text = cleanLine;
-    entry.isError = LogRoute::isErrorLine(cleanLine);
-    logLineBuffer.append(entry);
-    while (logLineBuffer.size() > kMaxLogBufferLines) {
-      logLineBuffer.removeFirst();
-    }
-
-    if (!logErrorsOnlyFilter || entry.isError) {
-      linesToShow << cleanLine;
-    }
-  }
-
-  if (!linesToShow.isEmpty()) {
-    runOnUiThread([linesToShow = std::move(linesToShow), this] {
+  if (!trimmed.isEmpty()) {
+    runOnUiThread([trimmedBatch = std::move(trimmed), this] {
       auto bar = ui->masterLogBrowser->verticalScrollBar();
       auto layout = qvLogDocument->documentLayout();
+      // Anchor to the block at the top of the viewport; if trim shifts its
+      // document-Y afterwards, we replay the original sub-block offset.
       QTextBlock anchorBlock =
           ui->masterLogBrowser->cursorForPosition(QPoint(0, 0)).block();
       int viewportOffset =
           bar->value() -
           static_cast<int>(layout->blockBoundingRect(anchorBlock).y());
-      FastAppendTextDocument(linesToShow.join('\n'), qvLogDocument);
+      FastAppendTextDocument(trimmedBatch, qvLogDocument);
       if (Configs::windowSettings->auto_scroll_log) {
         bar->setValue(bar->maximum());
       } else if (anchorBlock.isValid()) {
@@ -4511,6 +4491,54 @@ void MainWindow::show_log_impl(const QString &log) {
   logLock.unlock();
 }
 
+void MainWindow::handleSystemSuspend() {
+  suspendedProfileId =
+      running != nullptr ? running->id : Configs::dataStore->started_id;
+  if (resumeRecoveryTimer != nullptr)
+    resumeRecoveryTimer->stop();
+  if (suspendedProfileId >= 0)
+    MW_show_log("[Power] System is suspending; active profile state saved.");
+}
+
+void MainWindow::handleSystemResume() {
+  if (Configs::dataStore->prepare_exit)
+    return;
+  if (suspendedProfileId < 0)
+    suspendedProfileId = Configs::dataStore->started_id;
+  if (suspendedProfileId < 0)
+    return;
+
+  if (resumeRecoveryTimer == nullptr) {
+    resumeRecoveryTimer = new QTimer(this);
+    resumeRecoveryTimer->setSingleShot(true);
+    connect(resumeRecoveryTimer, &QTimer::timeout, this, [this] {
+      const int profileId = suspendedProfileId;
+      suspendedProfileId = -1;
+      if (profileId < 0 || Configs::dataStore->prepare_exit ||
+          core_process == nullptr) {
+        return;
+      }
+
+      MW_show_log(
+          "[Power] Resume detected; recreating core, TUN and active profile.");
+      if (running != nullptr)
+        profile_stop(true, true, false);
+
+      runOnThread(
+          [this, profileId] {
+            core_process->start_profile_when_core_is_up = profileId;
+            core_process->Restart();
+          },
+          DS_cores);
+    });
+  }
+
+  // Network adapters and Windows routes are still settling immediately after
+  // resume. Repeated resume notifications restart this timer instead of
+  // launching duplicate recovery jobs.
+  resumeRecoveryTimer->start(8000);
+}
+
 void MainWindow::on_masterLogBrowser_customContextMenuRequested(
     const QPoint &pos) {
   auto pos1 = ui->masterLogBrowser->viewport()->mapToGlobal(pos);
@@ -4518,58 +4546,9 @@ void MainWindow::on_masterLogBrowser_customContextMenuRequested(
 
   QMenu *menu = ui->masterLogBrowser->createStandardContextMenu();
 
-  auto cursor = ui->masterLogBrowser->textCursor();
-  QString contextText = cursor.selectedText();
-  contextText.replace(QChar(0x2029), '\n');
-  if (contextText.trimmed().isEmpty()) {
-    contextText = cursor.block().text();
-  }
-
-  const QStringList domains = LogRoute::extractDomains(contextText);
-  if (!domains.isEmpty()) {
-    auto sepRoute = new QAction(this);
-    sepRoute->setSeparator(true);
-    menu->addAction(sepRoute);
-
-    auto *addMenu = menu->addMenu(tr("Add to route"));
-    for (const QString &domain : domains) {
-      auto *domainMenu = addMenu->addMenu(domain);
-      const auto addAction = [=, this](Configs::simpleAction action,
-                                       const QString &matchType,
-                                       const QString &label) {
-        auto *act = domainMenu->addAction(label);
-        connect(act, &QAction::triggered, this, [=, this]() {
-          addLogDomainToRoute(domain, action, matchType);
-        });
-      };
-      addAction(Configs::direct, "suffix",
-                tr("Direct (suffix)"));
-      addAction(Configs::proxy, "suffix",
-                tr("Proxy (suffix)"));
-      addAction(Configs::block, "suffix",
-                tr("Block (suffix)"));
-      addAction(Configs::direct, "domain",
-                tr("Direct (exact domain)"));
-      addAction(Configs::proxy, "domain",
-                tr("Proxy (exact domain)"));
-    }
-  }
-
   auto sep = new QAction(this);
   sep->setSeparator(true);
   menu->addAction(sep);
-
-  auto *errorsOnlyAction = menu->addAction(tr("Show errors only"));
-  errorsOnlyAction->setCheckable(true);
-  errorsOnlyAction->setChecked(logErrorsOnlyFilter);
-  connect(errorsOnlyAction, &QAction::triggered, this, [=, this](bool checked) {
-    logErrorsOnlyFilter = checked;
-    if (logErrorsOnlyCheckBox != nullptr) {
-      QSignalBlocker blocker(logErrorsOnlyCheckBox);
-      logErrorsOnlyCheckBox->setChecked(checked);
-    }
-    rebuildLogView();
-  });
 
   auto action_clear = new QAction(this);
   auto action_stop = new QAction(this);
@@ -4580,7 +4559,6 @@ void MainWindow::on_masterLogBrowser_customContextMenuRequested(
 
   connect(action_clear, &QAction::triggered, this, [=, this] {
     CHECK_ACTION_ACCESS_W
-    logLineBuffer.clear();
     qvLogDocument->clear();
     ui->masterLogBrowser->clear();
   });
@@ -5300,7 +5278,7 @@ skip1:
   }
   {
     auto resp = NetworkRequestHelper::HttpGet(
-        "https://api.github.com/repos/qr243vbi/nekobox/releases");
+        "https://api.github.com/repos/1maxwarner/nekobox/releases");
     if (!resp.error.isEmpty()) {
       runOnUiThread([=, this] {
         MessageBoxWarning(QObject::tr("Update"),
