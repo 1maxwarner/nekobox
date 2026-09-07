@@ -10,6 +10,11 @@ on:
         type: boolean
         default: true
         required: true
+      release_version:
+        description: "Override release version (for rebuilding an existing release)"
+        type: string
+        default: ""
+        required: false
       pre_release:
         description: "Publish PreRelease"
         type: boolean
@@ -120,6 +125,11 @@ jobs:
 
           cmake -S . -B build -DGENERATE_VERSION_AND_CHANGELOG=ON
           cmake --build build -j 16
+          if [[ -n "${{ github.event.inputs.release_version }}" ]]; then
+            test -f "changelogs/${{ github.event.inputs.release_version }}.txt"
+            printf '%s\n' "${{ github.event.inputs.release_version }}" > build/version.txt
+            cp "changelogs/${{ github.event.inputs.release_version }}.txt" build/changelog.txt
+          fi
           set_output_file tag build/version.txt
           set_output_file text build/changelog.txt
 
