@@ -1,4 +1,0 @@
-- fix: restore VLESS XHTTP and Reality compatibility with the pinned project core
-- fix: use the official Hysteria2 transport for single-port Salamander profiles
-- fix: preserve VLESS Reality gRPC streams after dial context cancellation
-- fix: retry Void Linux dependency installation across mirrors for ARMv7 builds

@@ -1,0 +1,4 @@
+- fix: restore VLESS Reality gRPC compatibility and preserve streams after dial cancellation
+- fix: use the official Hysteria2 transport for single-port Salamander profiles
+- fix: route explicitly proxied private networks through TUN
+- fix: allow Windows packaging when zip is unavailable
