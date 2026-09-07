@@ -273,6 +273,7 @@ DialogVPNSettings::DialogVPNSettings(QWidget *parent)
   //   ui->auto_redirect->setChecked(Configs::dataStore->auto_redirect);
   ui->tun_address->setText(Configs::getTunAddress());
   ui->tun_address_6->setText(Configs::getTunAddress6());
+  ui->tun_name->setText(Configs::dataStore->tun_name);
   ADJUST_SIZE
 
   if (!ipv6) {
@@ -297,6 +298,8 @@ void DialogVPNSettings::accept() {
     Configs::dataStore->tun_address_6 = ui->tun_address_6->text();
   }
   Configs::dataStore->tun_address = ui->tun_address->text();
+  auto tunName = ui->tun_name->text().trimmed();
+  Configs::dataStore->tun_name = tunName.isEmpty() ? QStringLiteral("Neko TUN") : tunName;
   //   Configs::dataStore->auto_redirect = ui->auto_redirect->isChecked();
   //   Configs::dataStore->tun_name = ui->tun_name->text();
   //

@@ -515,6 +515,7 @@ QByteArray hash = QCryptographicHash::hash(
         ADD_MAP("route_exclude_addrs", route_exclude_addrs, stringList);
         ADD_MAP("tun_address", tun_address, string);
         ADD_MAP("tun_address_6", tun_address_6, string);
+        ADD_MAP("tun_name", tun_name, string);
     STOP_MAP
 
     void DataStore::UpdateStartedId(int id) {

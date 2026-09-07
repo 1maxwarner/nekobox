@@ -15,6 +15,9 @@
 #include <QDir>
 #include <QFile>
 #include <QFileInfo>
+#include <QHash>
+#include <QHostAddress>
+#include <QJsonDocument>
 #include <QStandardPaths>
 
 #ifdef _WIN32
@@ -384,7 +387,41 @@ QString getTunAddress6() {
 }
 
 QString getTunName() {
-  return "tun_" + GetRandomString(9, ExcludeUppercase | ExcludeDigits);
+  auto name = dataStore->tun_name.trimmed();
+  if (name.isEmpty())
+    name = QStringLiteral("Neko TUN");
+#ifndef _WIN32
+  name.replace(' ', '_');
+#endif
+  return name.left(15);
+}
+
+static bool IsPrivateRouteCIDR(const QString &cidr) {
+  const auto address = QHostAddress(cidr.section('/', 0, 0).trimmed());
+  if (address.isNull())
+    return false;
+  return address.isInSubnet(QHostAddress(QStringLiteral("10.0.0.0")), 8) ||
+         address.isInSubnet(QHostAddress(QStringLiteral("172.16.0.0")), 12) ||
+         address.isInSubnet(QHostAddress(QStringLiteral("192.168.0.0")), 16) ||
+         address.isInSubnet(QHostAddress(QStringLiteral("127.0.0.0")), 8) ||
+         address.isInSubnet(QHostAddress(QStringLiteral("fc00::")), 7) ||
+         address.isInSubnet(QHostAddress(QStringLiteral("fe80::")), 10);
+}
+
+static bool HasProxyPrivateRoute(const std::shared_ptr<RoutingChain> &routeChain) {
+  for (const auto &rule : routeChain->Rules) {
+    if (rule->action != QStringLiteral("route") ||
+        rule->outboundID == directID || rule->outboundID == blockID ||
+        rule->outboundID == dnsOutID)
+      continue;
+    if (rule->ip_is_private)
+      return true;
+    for (const auto &cidr : rule->ip_cidr) {
+      if (IsPrivateRouteCIDR(cidr))
+        return true;
+    }
+  }
+  return false;
 }
 
 void MergeJson(const QJsonObject &custom, QJsonObject &outbound) {
@@ -1199,7 +1236,8 @@ QJsonObject BuildDnsObject(QString address, bool tunEnabled) {
 }
 
 QJsonObject BuildTunInbound(const QStringList &directIPSets,
-                            const QStringList &directIPCIDRs) {
+                            const QStringList &directIPCIDRs,
+                            bool routePrivateThroughTun) {
   QJsonObject inboundObj;
   inboundObj["tag"] = "tun-in";
   inboundObj["type"] = "tun";
@@ -1222,6 +1260,14 @@ QJsonObject BuildTunInbound(const QStringList &directIPSets,
 
   QJsonArray routeExcludeAddrs =
       QListStr2QJsonArray(Configs::dataStore->route_exclude_addrs);
+  if (routePrivateThroughTun) {
+    const QStringList privateCIDRs = {
+        "10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16",
+        "127.0.0.0/8", "169.254.0.0/16", "224.0.0.0/4",
+        "255.255.255.255/32"};
+    for (const auto &cidr : privateCIDRs)
+      routeExcludeAddrs.removeAll(cidr);
+  }
   QJsonArray routeExcludeSets;
   if (dataStore->enable_tun_routing) {
     for (auto item : directIPCIDRs)
@@ -1396,7 +1442,8 @@ skip_multiple_jobs:
 
   // tun-in
   if ((dataStore->spmode_vpn && !status->forTest) || blockAll) {
-    status->inbounds += BuildTunInbound(directIPSets, directIPCIDRs);
+    status->inbounds += BuildTunInbound(
+        directIPSets, directIPCIDRs, HasProxyPrivateRoute(routeChain));
   }
 
   // ntp
