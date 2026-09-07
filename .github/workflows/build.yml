@@ -221,7 +221,12 @@ jobs:
           then
             gh release create "${INPUT_VERSION}" --title "${INPUT_VERSION}" --notes "${MESSAGE}" $PRE
           fi
-          gh release upload "${INPUT_VERSION}" deployment/* --clobber
+          mapfile -d '' release_files < <(find deployment -maxdepth 1 -type f -print0)
+          if [[ ${#release_files[@]} -eq 0 ]]; then
+            echo "No release files found in deployment" >&2
+            exit 1
+          fi
+          gh release upload "${INPUT_VERSION}" "${release_files[@]}" --clobber
       - name: Tar files
         if: matrix.cross_os == 'public' || ( github.event.inputs.source_only  != 'true' && matrix.allow == 'true' )
         run: tar czvf artifacts.tgz ./deployment
@@ -447,7 +452,12 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release upload "$INPUT_VERSION" ./deployment/* --clobber
+          mapfile -d '' release_files < <(find ./deployment -maxdepth 1 -type f -print0)
+          if [[ ${#release_files[@]} -eq 0 ]]; then
+            echo "No release files found in deployment" >&2
+            exit 1
+          fi
+          gh release upload "$INPUT_VERSION" "${release_files[@]}" --clobber
           
       - name: Tar files
         shell: bash
@@ -546,6 +556,12 @@ jobs:
           url: https://github.com/AppImage/appimagetool/releases/download/continuous/appimagetool-${{ matrix.target1 }}.AppImage
           destination: appimagetool-${{ matrix.target1 }}.AppImage
 
+      - name: Download AppImage runtime
+        uses: ethanjli/cached-download-action@main
+        with:
+          url: https://github.com/AppImage/type2-runtime/releases/download/continuous/runtime-${{ matrix.target1 }}
+          destination: runtime-${{ matrix.target1 }}
+
       - name: Linux - Generate MakeFile and Build
         shell: bash
         env:
@@ -559,7 +575,7 @@ jobs:
           echo "GOOS=${GOOS}" >> .ENV
           echo "INPUT_VERSION=${INPUT_VERSION}" >> .ENV
           echo "SKIP_UPDATE_BUTTON=${SKIP_UPDATE_BUTTON}" >> .ENV
-          docker compose up --force-recreate --build
+          docker compose up --force-recreate --build --abort-on-container-exit --exit-code-from myapp
 
       - name: Linux - Publish
         if: github.event.inputs.publish  == 'true'
@@ -567,7 +583,12 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release upload "$INPUT_VERSION" ./deployment/* --clobber
+          mapfile -d '' release_files < <(find ./deployment -maxdepth 1 -type f -print0)
+          if [[ ${#release_files[@]} -eq 0 ]]; then
+            echo "No release files found in deployment" >&2
+            exit 1
+          fi
+          gh release upload "$INPUT_VERSION" "${release_files[@]}" --clobber
 
       - name: Tar files
         shell: bash
