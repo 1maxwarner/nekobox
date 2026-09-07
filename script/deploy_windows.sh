@@ -130,7 +130,14 @@ then
 mv "$ARCH" "$version_standalone-$ARCH"
 else
 mv "$ARCH" nekobox
-zip -9 -r "$version_standalone-$ARCH.zip" nekobox
+if command -v zip >/dev/null 2>&1; then
+    zip -9 -r "$version_standalone-$ARCH.zip" nekobox
+elif command -v 7z >/dev/null 2>&1; then
+    7z a -tzip -mx=9 "$version_standalone-$ARCH.zip" nekobox
+else
+    # Windows runners provide bsdtar even when the zip package is unavailable.
+    tar -a -c -f "$version_standalone-$ARCH.zip" nekobox
+fi
 rm -rf nekobox
 fi
 
