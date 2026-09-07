@@ -1263,8 +1263,12 @@ QJsonObject BuildTunInbound(const QStringList &directIPSets,
         "10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16",
         "127.0.0.0/8", "169.254.0.0/16", "224.0.0.0/4",
         "255.255.255.255/32"};
-    for (const auto &cidr : privateCIDRs)
-      routeExcludeAddrs.removeAll(cidr);
+    for (const auto &cidr : privateCIDRs) {
+      for (qsizetype i = routeExcludeAddrs.size(); i-- > 0;) {
+        if (routeExcludeAddrs.at(i).toString() == cidr)
+          routeExcludeAddrs.removeAt(i);
+      }
+    }
   }
   QJsonArray routeExcludeSets;
   if (dataStore->enable_tun_routing) {
