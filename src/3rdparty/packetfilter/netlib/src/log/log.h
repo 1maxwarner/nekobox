@@ -972,7 +972,14 @@ namespace netlib::log {
                 // Always add the message
                 if (!first_component) out << ' ';
                 out << message << '\n';
+#ifdef emit
+#pragma push_macro("emit")
+#undef emit
                 out.emit();
+#pragma pop_macro("emit")
+#else
+                out.emit();
+#endif
                 try {
                     stream.flush();  // Stream buffer -> OS/console (may throw)
                 }
@@ -987,7 +994,14 @@ namespace netlib::log {
                     << compact_thread_id();
                 out << std::dec << std::setfill(' ') << "] [" << derived_name() << "] "
                     << message << '\n';
+#ifdef emit
+#pragma push_macro("emit")
+#undef emit
                 out.emit();
+#pragma pop_macro("emit")
+#else
+                out.emit();
+#endif
                 try {
                     stream.flush();
                 }
