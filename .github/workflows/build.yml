@@ -380,7 +380,17 @@ jobs:
 
       - name: Setup Ninja
         if: matrix.allow == 'true'
-        uses: qr243vbi/setup-ninja@master
+        shell: pwsh
+        run: |
+          $ninja = Get-Command ninja -ErrorAction SilentlyContinue
+          if (-not $ninja) {
+            choco install ninja --no-progress --yes
+            $ninja = Get-Command ninja -ErrorAction SilentlyContinue
+          }
+          if (-not $ninja) {
+            throw 'Ninja is not available on the runner'
+          }
+          ninja --version
 
       - name: Install NSIS
         if: matrix.allow == 'true' && matrix.target != 'arm64'
