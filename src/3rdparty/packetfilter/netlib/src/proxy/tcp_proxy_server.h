@@ -1584,7 +1584,9 @@ namespace proxy
          */
         static DWORD wait_for_multiple_objects(const DWORD count, const HANDLE* handles, const DWORD ms)
         {
-            // Thread local seed for rand_r
+            // Thread-local state used to vary the traversal order when the
+            // wait set must be split. This avoids the unavailable MSVC rand_s
+            // declaration while retaining the starvation-avoidance behavior.
             thread_local auto seed = static_cast<uint32_t>(time(nullptr));
 
             // Initial result set to timeout
@@ -1601,7 +1603,10 @@ namespace proxy
 
                     // Divide the wait time in half, if timeout is infinite, use a default wait time of 2000ms
                     const DWORD wait = (ms == INFINITE ? 2000 : ms) / 2;
-                    const int random = rand_s(&seed);
+                    seed ^= seed << 13;
+                    seed ^= seed >> 17;
+                    seed ^= seed << 5;
+                    const auto random = seed;
 
                     // Recurse on both halves in a random order until a handle is signaled or all handles are checked
                     for (short branch = 0; branch < 2 && result == WAIT_TIMEOUT; branch++)

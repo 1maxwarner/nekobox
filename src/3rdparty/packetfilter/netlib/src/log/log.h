@@ -14,6 +14,7 @@
 #include <cstdint>
 #include <iomanip>
 #include <iterator>
+#include <ctime>
 
 #if __has_include(<source_location>) && defined(__cpp_lib_source_location) && __cpp_lib_source_location >= 201907L
 #include <source_location>
@@ -921,18 +922,27 @@ namespace netlib::log {
                 if (has_verbosity_flag(verbosity, log_verbosity::timestamp)) {
                     add_separator();
 
-                    using std::chrono::floor;
                     const auto now = std::chrono::system_clock::now();
-                    const auto tp_s = floor<std::chrono::seconds>(now);
                     const auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(
                         now.time_since_epoch()) % 1000;
 
-                    // MSVC's C++20 library does not provide chrono timezone
-                    // support on all supported toolsets. Emit the system clock
-                    // timestamp directly; the suffix makes the lack of a
-                    // timezone conversion explicit and keeps logging portable.
-                    out << std::format("{:%Y-%m-%dT%H:%M:%S}.{:03}Z", tp_s,
-                                       static_cast<int>(ms.count()));
+                    // Avoid chrono formatters: the MSVC toolsets used by the
+                    // Windows builds do not consistently implement them.
+                    const auto time = std::chrono::system_clock::to_time_t(now);
+                    std::tm utc{};
+#if defined(_WIN32)
+                    const bool converted = ::gmtime_s(&utc, &time) == 0;
+#else
+                    const bool converted = ::gmtime_r(&time, &utc) != nullptr;
+#endif
+                    char timestamp[32]{};
+                    if (converted && std::strftime(timestamp, sizeof(timestamp),
+                                                   "%Y-%m-%dT%H:%M:%S", &utc) != 0) {
+                        out << timestamp << '.' << std::setw(3) << std::setfill('0')
+                            << static_cast<int>(ms.count()) << std::setfill(' ') << 'Z';
+                    } else {
+                        out << "1970-01-01T00:00:00.000Z";
+                    }
                 }
 
                 // Conditionally include thread ID
