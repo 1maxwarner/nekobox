@@ -28,6 +28,7 @@ namespace Icon {
         VPN = 3,
         DNS = 4,
         SYSTEM_PROXY_DNS = 5,
+        PACKET_FILTER = 6,
     };
 
     enum class State {

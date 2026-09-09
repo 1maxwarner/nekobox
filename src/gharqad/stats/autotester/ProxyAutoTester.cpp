@@ -49,8 +49,9 @@ void ProxyAutoTester::Start() {
 
     // Start health monitoring
     healthCheckTimer->start(30000); // Check every 30 seconds
-    if (Configs::dataStore->spmode_vpn) {
-        logStatus("Health monitoring enabled (TUN mode)");
+    if (Configs::dataStore->spmode_vpn ||
+        Configs::dataStore->spmode_packet_filter) {
+        logStatus("Health monitoring enabled (transparent mode)");
     } else {
         logStatus("Health monitoring enabled (Proxy mode)");
     }

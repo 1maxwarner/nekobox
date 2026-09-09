@@ -175,6 +175,7 @@ namespace Configs {
 
 std::map<Icon::TrayIconStatus, IndicatorRule> indicatorRuleMap = {
     {Icon::TrayIconStatus::VPN, {0.4, 0.04, 0.4, QColor(165, 42, 42)}},
+    {Icon::TrayIconStatus::PACKET_FILTER, {0.4, 0.04, 0.4, QColor(0, 145, 190)}},
     {Icon::TrayIconStatus::DNS, {0.4, 0.04, 0.4, Qt::darkMagenta}},
     {Icon::TrayIconStatus::SYSTEM_PROXY, {0.4, 0.04, 0.4, Qt::blue}},
     {Icon::TrayIconStatus::SYSTEM_PROXY_DNS, {0.4, 0.04, 0.4, Qt::darkMagenta}},

@@ -380,6 +380,23 @@ set_target_properties(nekobox PROPERTIES
 set(EXECUTABLE_NAME "nekobox" CACHE STRING "Executable name")
 set_target_properties(nekobox PROPERTIES OUTPUT_NAME "${EXECUTABLE_NAME}")
 
+if(WIN32)
+    set(PACKET_FILTER_RUNTIME_DIR "$ENV{PACKET_FILTER_RUNTIME_DIR}" CACHE PATH
+        "Directory containing the ProxiFyre Windows Packet Filter runtime")
+    if(PACKET_FILTER_RUNTIME_DIR)
+        if(NOT EXISTS "${PACKET_FILTER_RUNTIME_DIR}/ProxiFyre.exe" OR
+           NOT EXISTS "${PACKET_FILTER_RUNTIME_DIR}/socksify.dll")
+            message(FATAL_ERROR
+                "PACKET_FILTER_RUNTIME_DIR must contain ProxiFyre.exe and socksify.dll")
+        endif()
+        add_custom_command(TARGET nekobox POST_BUILD
+            COMMAND ${CMAKE_COMMAND} -E copy_directory
+                "${PACKET_FILTER_RUNTIME_DIR}"
+                "$<TARGET_FILE_DIR:nekobox>/packetfilter"
+            COMMENT "Copying Windows Packet Filter runtime")
+    endif()
+endif()
+
 add_custom_command(TARGET nekobox POST_BUILD
     COMMAND ${CMAKE_COMMAND} -E make_directory
         "$<TARGET_FILE_DIR:nekobox>/public"

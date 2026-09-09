@@ -10,17 +10,17 @@ if [[ $1 == "x86_64" || -z $1 ]]; then
   CROSS="windows-amd64"
   NAIVE="amd64"
   INST="$DEPLOYMENT/nekobox_setup"
-else if [[ $1 == "arm64" ]]; then
+elif [[ $1 == "arm64" ]]; then
   ARCH="windows-arm64"
   CROSS=$ARCH
   NAIVE="arm64"
   INST="$DEPLOYMENT/nekobox_setup_arm64"
-else if [[ $1 == "i686" || $1 == "x86" ]]; then
+elif [[ $1 == "i686" || $1 == "x86" ]]; then
   ARCH="windows32"
   CROSS="windows-386"
   NAIVE="false"
   INST="$DEPLOYMENT/nekobox_setup32"
-fi; fi; fi;
+fi
 
 export DEST="$DEPLOYMENT/$ARCH"
 mkdir -p "$DEST"
@@ -69,6 +69,11 @@ cp "$rel/$nekoray.exe" "$DEST"
 #cp "$rel/elevated_launcher.exe" "$DEST"
 touch "$rel/nekobox.dll"
 cp "$rel/"*.dll  "$DEST"
+if [[ -d "$rel/packetfilter" ]]
+then
+  mkdir -p "$DEST/packetfilter"
+  cp -RT "$rel/packetfilter" "$DEST/packetfilter"
+fi
 
 [[ -f "$BUILD/nekobox_core.exe" ]] && cp "$BUILD/nekobox_core.exe" "$DEST" 
 [[ -f "$BUILD/updater.exe" ]] && cp "$BUILD/updater.exe" "$DEST"

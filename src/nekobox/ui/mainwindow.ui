@@ -265,6 +265,19 @@ QToolButton::menu-indicator {
          </widget>
         </item>
         <item>
+         <widget class="QCheckBox" name="checkBox_PacketFilter">
+          <property name="sizePolicy">
+           <sizepolicy hsizetype="Minimum" vsizetype="Maximum">
+            <horstretch>0</horstretch>
+            <verstretch>0</verstretch>
+           </sizepolicy>
+          </property>
+          <property name="text">
+           <string>Packet Filter</string>
+          </property>
+         </widget>
+        </item>
+        <item>
          <widget class="QCheckBox" name="system_dns">
           <property name="sizePolicy">
            <sizepolicy hsizetype="Minimum" vsizetype="Maximum">
@@ -676,9 +689,10 @@ QToolButton::menu-indicator {
     </property>
     <widget class="QMenu" name="menu_spmode">
      <property name="title">
-      <string>System Proxy</string>
+      <string>Connection Mode</string>
      </property>
      <addaction name="menu_spmode_system_proxy"/>
+     <addaction name="menu_spmode_packet_filter"/>
      <addaction name="menu_spmode_vpn"/>
      <addaction name="menu_spmode_disabled"/>
     </widget>
@@ -967,6 +981,14 @@ QToolButton::menu-indicator {
    </property>
    <property name="text">
     <string>Enable System Proxy</string>
+   </property>
+  </action>
+  <action name="menu_spmode_packet_filter">
+   <property name="checkable">
+    <bool>true</bool>
+   </property>
+   <property name="text">
+    <string>Enable Packet Filter</string>
    </property>
   </action>
   <action name="menu_spmode_disabled">

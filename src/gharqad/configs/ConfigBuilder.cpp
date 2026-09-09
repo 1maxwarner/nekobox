@@ -477,16 +477,21 @@ BuildConfig(const std::shared_ptr<ProxyEntity> &ent, bool forTest,
       if (!status->forTest) {
         QJsonArray clientInbounds;
         if (IsValidPort(dataStore->inbound_socks_port) &&
-            Configs::dataStore->proxyInboundEnabled()) {
+            (Configs::dataStore->proxyInboundEnabled() ||
+             dataStore->spmode_packet_filter)) {
           QJsonObject inboundObj;
           inboundObj["tag"] = "mixed-in";
           inboundObj["type"] =
 #ifdef USE_CPP_PROXY_CONFIGURATOR
               "mixed"
 #else
-              (QString)*Configs::dataStore->inbound_proxy_type;
+              (dataStore->spmode_packet_filter
+                   ? QString("mixed")
+                   : (QString)*Configs::dataStore->inbound_proxy_type);
 #endif
-          inboundObj["listen"] = dataStore->inbound_address;
+          inboundObj["listen"] = dataStore->spmode_packet_filter
+                                      ? QString("127.0.0.1")
+                                      : dataStore->inbound_address;
           inboundObj["listen_port"] = dataStore->inbound_socks_port;
           auto &uname = dataStore->inbound_username;
           auto &upass = dataStore->inbound_password;
@@ -1499,11 +1504,11 @@ void BuildConfigSingBox(const std::shared_ptr<BuildConfigStatus> &status) {
 skip_multiple_jobs:
   // Inbounds
   // mixed-in
-  int proxy_type = Configs::dataStore->inbound_proxy_type->value;
   if (IsValidPort(dataStore->inbound_socks_port) &&
       (!status->forTest || blockAll)
 #ifndef USE_CPP_PROXY_CONFIGURATOR
-      && Configs::dataStore->proxyInboundEnabled()
+      && (Configs::dataStore->proxyInboundEnabled() ||
+          dataStore->spmode_packet_filter)
 #endif
   ) {
     QJsonObject inboundObj;
@@ -1512,9 +1517,13 @@ skip_multiple_jobs:
 #ifdef USE_CPP_PROXY_CONFIGURATOR
         "mixed"
 #else
-        (QString)*Configs::dataStore->inbound_proxy_type;
+        (dataStore->spmode_packet_filter
+             ? QString("mixed")
+             : (QString)*Configs::dataStore->inbound_proxy_type);
 #endif
-        inboundObj["listen"] = dataStore->inbound_address;
+    inboundObj["listen"] = dataStore->spmode_packet_filter
+                                ? QString("127.0.0.1")
+                                : dataStore->inbound_address;
     inboundObj["listen_port"] = dataStore->inbound_socks_port;
     QString &inbound_username = dataStore->inbound_username;
     QString &inbound_password = dataStore->inbound_password;

@@ -13,6 +13,8 @@
 #include <3rdparty/qv2ray/v2/proxy/QvProxyConfigurator.hpp>
 #include <nekobox/global/GuiUtils.hpp>
 #include <QInputDialog>
+#include <QCoreApplication>
+#include <QFileInfo>
 #include <QPushButton>
 #include <QDesktopServices>
 #include <QMessageBox>
@@ -709,6 +711,45 @@ void MainWindow::profile_start(int _id, bool do_not_test) {
         Configs::dataStore->UpdateStartedId(ent->id);
         running = ent;
 
+#ifdef Q_OS_WIN
+        if (Configs::dataStore->spmode_packet_filter) {
+            QStringList excludedProcesses{
+                QFileInfo(QCoreApplication::applicationFilePath()).fileName(),
+                "nekobox.exe", "nekobox_core.exe", "ProxiFyre.exe"};
+            const auto corePath = Configs::FindCoreRealPath();
+            if (!corePath.isEmpty())
+                excludedProcesses.append(QFileInfo(corePath).fileName());
+
+            QString filterError;
+            if (!packet_filter->start(
+                    Configs::dataStore->inbound_socks_port,
+                    Configs::dataStore->inbound_username,
+                    Configs::dataStore->inbound_password, excludedProcesses,
+                    &filterError)) {
+                packet_filter->stop();
+                Configs::dataStore->spmode_packet_filter = false;
+                Configs::dataStore->remember_spmode.removeAll("packet_filter");
+                Configs::dataStore->Save();
+                packet_filter_failure_pending = false;
+                bool stopOK = false;
+                defaultClient->Stop(&stopOK);
+                Stats::trafficLooper->loop_enabled = false;
+                Stats::connection_lister->suspend = true;
+                Configs::dataStore->UpdateStartedId(-1919);
+                running = nullptr;
+                runOnUiThread([=, this] {
+                    refresh_status();
+                    QMessageBox::warning(
+                        this, tr("Packet Filter"),
+                        tr("Packet Filter could not be started: %1")
+                            .arg(filterError));
+                });
+                return false;
+            }
+            packet_filter_failure_pending = false;
+        }
+#endif
+
         runOnUiThread([=, this] {
             refresh_status();
             refresh_proxy_list(ent->id);
@@ -784,6 +825,8 @@ void MainWindow::profile_start(int _id, bool do_not_test) {
 }
 
 bool MainWindow::set_spmode_system_proxy(bool enable, bool save) {
+    if (enable && Configs::dataStore->spmode_packet_filter)
+        set_spmode_packet_filter(false, false, false);
     #ifndef USE_CPP_PROXY_CONFIGURATOR
     bool isok = true;
     int inbound_proxy_type = Configs::dataStore->inbound_proxy_type->value;
@@ -833,6 +876,66 @@ bool MainWindow::set_spmode_system_proxy(bool enable, bool save) {
     return enable;
 }
 
+bool MainWindow::set_spmode_packet_filter(bool enable, bool save,
+                                           bool requestAdmin) {
+#ifndef Q_OS_WIN
+    Q_UNUSED(enable);
+    Q_UNUSED(save);
+    Q_UNUSED(requestAdmin);
+    return false;
+#else
+    if (enable == Configs::dataStore->spmode_packet_filter) {
+        if (!enable) {
+            if (packet_filter)
+                packet_filter->stop();
+            return false;
+        }
+        if (!Configs::dataStore->spmode_system_proxy &&
+            !Configs::dataStore->spmode_vpn)
+            return true;
+    }
+
+    // Packet filtering replaces TUN/system-proxy interception. Keeping one
+    // interception layer avoids loops and double proxying.
+    if (enable) {
+        if (Configs::dataStore->spmode_system_proxy &&
+            set_spmode_system_proxy(false, false)) {
+            MW_show_log(tr("Packet Filter was not enabled because the system proxy could not be cleared."));
+            refresh_status();
+            return false;
+        }
+        if (Configs::dataStore->spmode_vpn)
+            set_spmode_vpn(false, false, false);
+        Configs::dataStore->remember_spmode.removeAll("system_proxy");
+        Configs::dataStore->remember_spmode.removeAll("vpn");
+    }
+
+    Configs::dataStore->spmode_packet_filter = enable;
+    if (enable)
+        packet_filter_failure_pending = false;
+    if (!enable)
+        Configs::dataStore->remember_spmode.removeAll("packet_filter");
+    if (save) {
+        if (enable && Configs::windowSettings->remember_last_profile)
+            Configs::dataStore->remember_spmode.append("packet_filter");
+        Configs::dataStore->Save();
+    }
+
+    if (!enable && packet_filter)
+        packet_filter->stop();
+    if (!enable)
+        packet_filter_failure_pending = false;
+
+    if (requestAdmin) {
+        refresh_status();
+        if (Configs::dataStore->started_id >= 0)
+            profile_start(Configs::dataStore->started_id,
+                          !Configs::windowSettings->test_after_start);
+    }
+    return enable;
+#endif
+}
+
 void MainWindow::profile_stop(bool crash, bool block, bool manual) {
     if (running == nullptr) {
         return;
@@ -840,6 +943,10 @@ void MainWindow::profile_stop(bool crash, bool block, bool manual) {
     auto id = running->id;
 
     auto profile_stop_stage2 = [=,this] {
+#ifdef Q_OS_WIN
+        if (packet_filter)
+            packet_filter->stop();
+#endif
         if (!crash) {
             bool rpcOK;
             QString error = defaultClient->Stop(&rpcOK);

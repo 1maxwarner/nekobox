@@ -132,6 +132,7 @@ namespace Configs {
         bool prepare_exit = false;
         bool spmode_vpn = false;
         bool spmode_system_proxy = false;
+        bool spmode_packet_filter = false;
         bool need_keep_vpn_off = false;
         QString appdataDir = "";
         QStringList ignoreConnTag = {};

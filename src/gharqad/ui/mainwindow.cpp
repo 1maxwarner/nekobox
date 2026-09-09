@@ -187,6 +187,7 @@ void MainWindow::changeEventTrigger(bool fontChange){
   this->ui->proxyListTable->verticalHeader()->setFont(font);
   this->ui->checkBox_SystemProxy->setFont(font);
   this->ui->checkBox_VPN->setFont(font);
+  this->ui->checkBox_PacketFilter->setFont(font);
   this->ui->system_dns->setFont(font);
 
   QString stylesheet = "";
@@ -819,6 +820,12 @@ MainWindow::MainWindow(QWidget *parent)
   int font_size = Configs::windowSettings->font_size;
   // Setup misc UI
   ui->setupUi(this);
+#ifdef Q_OS_WIN
+  packet_filter = std::make_unique<Configs_sys::PacketFilterController>();
+#else
+  ui->checkBox_PacketFilter->hide();
+  ui->menu_spmode_packet_filter->setVisible(false);
+#endif
 
   connect(themeManager, &ThemeManager::themeChanged, this,
           [=, this](const QString &theme) {
@@ -1406,12 +1413,21 @@ skip_updater_hide:
             #endif
               ui->checkBox_SystemProxy->setChecked(set_spmode_system_proxy(checked));
           });
+  connect(ui->checkBox_PacketFilter, &QCheckBox::clicked, this,
+          [=, this](bool checked) {
+            CHECK_ACTION_ACCESS_W
+            ui->checkBox_PacketFilter->setChecked(
+                set_spmode_packet_filter(checked));
+          });
   connect(ui->menu_spmode, &QMenu::aboutToShow, this, [=, this]() {
     ui->menu_spmode_disabled->setChecked(
         !(Configs::dataStore->spmode_system_proxy ||
-          Configs::dataStore->spmode_vpn));
+          Configs::dataStore->spmode_vpn ||
+          Configs::dataStore->spmode_packet_filter));
     ui->menu_spmode_system_proxy->setChecked(
         Configs::dataStore->spmode_system_proxy);
+    ui->menu_spmode_packet_filter->setChecked(
+        Configs::dataStore->spmode_packet_filter);
     ui->menu_spmode_vpn->setChecked(Configs::dataStore->spmode_vpn);
   });
   connect(ui->menu_spmode_system_proxy, &QAction::triggered, this,
@@ -1422,10 +1438,15 @@ skip_updater_hide:
           [=, this](bool checked) {
             CHECK_ACTION_ACCESS_W set_spmode_vpn(checked);
           });
+  connect(ui->menu_spmode_packet_filter, &QAction::triggered, this,
+          [=, this](bool checked) {
+            CHECK_ACTION_ACCESS_W set_spmode_packet_filter(checked);
+          });
   connect(ui->menu_spmode_disabled, &QAction::triggered, this, [=, this]() {
     CHECK_ACTION_ACCESS_W
     set_spmode_system_proxy(false);
     set_spmode_vpn(false);
+    set_spmode_packet_filter(false);
   });
   connect(ui->menu_qr, &QAction::triggered, this,
           [=, this]() { display_qr_link(false); });
@@ -1822,7 +1843,21 @@ skip_updater_hide:
           &MainWindow::on_commitDataRequest);
 
   auto t = new QTimer;
-  connect(t, &QTimer::timeout, this, [=, this]() { refresh_status(); });
+  connect(t, &QTimer::timeout, this, [=, this]() {
+#ifdef Q_OS_WIN
+    if (Configs::dataStore->spmode_packet_filter && running != nullptr &&
+        packet_filter && !packet_filter->isRunning() &&
+        !packet_filter_failure_pending) {
+      packet_filter_failure_pending = true;
+      Configs::dataStore->spmode_packet_filter = false;
+      Configs::dataStore->remember_spmode.removeAll("packet_filter");
+      Configs::dataStore->Save();
+      MW_show_log(tr("Packet Filter stopped unexpectedly; stopping profile"));
+      profile_stop(false, false, false);
+    }
+#endif
+    refresh_status();
+  });
   t->start(2000);
 
   t = new QTimer;
@@ -2271,6 +2306,10 @@ qDebug() << "NeedChoosePort caused" << info.contains("NeedChoosePort");
           Configs::dataStore->flag_restart_tun_on) {
         set_spmode_vpn(true, false);
       }
+      if (Configs::dataStore->remember_spmode.contains("packet_filter") ||
+          Configs::dataStore->spmode_packet_filter) {
+        set_spmode_packet_filter(true, false, false);
+      }
       if (Configs::dataStore->flag_dns_set) {
         set_system_dns(true);
       }
@@ -2400,6 +2439,7 @@ void MainWindow::prepare_exit() {
   if (Configs::dataStore->system_dns_set)
     set_system_dns(false, false);
   set_spmode_system_proxy(false, false);
+  set_spmode_packet_filter(false, false, false);
   //
   on_commitDataRequest();
   //
@@ -2669,6 +2709,9 @@ void MainWindow::set_spmode_vpn(bool enable, bool save, bool requestAdmin) {
   if (enable == Configs::dataStore->spmode_vpn)
     return;
 
+  if (enable && Configs::dataStore->spmode_packet_filter)
+    set_spmode_packet_filter(false, false, false);
+
   if (enable && requestAdmin) {
     bool requestPermission = !Configs::IsAdmin();
     if (requestPermission) {
@@ -2681,6 +2724,7 @@ void MainWindow::set_spmode_vpn(bool enable, bool save, bool requestAdmin) {
 
   if (save) {
     Configs::dataStore->remember_spmode.removeAll("vpn");
+    Configs::dataStore->remember_spmode.removeAll("packet_filter");
     if (enable) {
       Configs::dataStore->remember_spmode.append("vpn");
     }
@@ -2973,6 +3017,8 @@ void MainWindow::refresh_status(const QString &traffic_update) {
   //
   ui->checkBox_VPN->setChecked(Configs::dataStore->spmode_vpn);
   ui->checkBox_SystemProxy->setChecked(Configs::dataStore->spmode_system_proxy);
+  ui->checkBox_PacketFilter->setChecked(
+      Configs::dataStore->spmode_packet_filter);
 
   ui->label_running->setToolTip({});
 
@@ -2985,6 +3031,8 @@ void MainWindow::refresh_status(const QString &traffic_update) {
     if (Configs::dataStore->spmode_vpn &&
         !Configs::dataStore->spmode_system_proxy)
       tt << "[Tun]";
+    if (Configs::dataStore->spmode_packet_filter)
+      tt << "[Packet Filter]";
     if (!Configs::dataStore->spmode_vpn &&
         Configs::dataStore->spmode_system_proxy)
       tt << "[" + tr("System Proxy") + "]";
@@ -3010,7 +3058,9 @@ void MainWindow::refresh_status(const QString &traffic_update) {
   auto icon_status_new = Icon::TrayIconStatus::NONE;
 
   if (running != nullptr) {
-    if (Configs::dataStore->spmode_vpn) {
+    if (Configs::dataStore->spmode_packet_filter) {
+      icon_status_new = Icon::TrayIconStatus::PACKET_FILTER;
+    } else if (Configs::dataStore->spmode_vpn) {
       icon_status_new = Icon::TrayIconStatus::VPN;
     } else if (Configs::dataStore->system_dns_set &&
                Configs::dataStore->spmode_system_proxy) {
@@ -3053,6 +3103,7 @@ void setAppIcon(Icon::TrayIconStatus icon_status_new, QSystemTrayIcon *tray,
     case Icon::TrayIconStatus::SYSTEM_PROXY_DNS:
     case Icon::TrayIconStatus::DNS:
     case Icon::TrayIconStatus::VPN:
+    case Icon::TrayIconStatus::PACKET_FILTER:
       state = Icon::State::RUNNING;
       break;
     case Icon::TrayIconStatus::NONE:

@@ -1,2 +1,5 @@
 - fix: generate sing-box-compatible Game Mod port ranges
 - fix: prevent Discord and other selected services from breaking router initialization
+- feat: add Windows Packet Filter mode for transparent TCP/UDP interception
+- feat: package ProxiFyre and the signed NDISAPI driver in Windows builds
+- fix: make Packet Filter, TUN, and System Proxy mutually exclusive and fail closed
