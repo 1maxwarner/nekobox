@@ -897,6 +897,8 @@ Function InstallNetworkFilter
     nsExec::ExecToLog 'powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$INSTDIR\install_packet_filter.ps1" -MsiPath "$INSTDIR\packetfilter\$2" -RenameScript "$INSTDIR\rename_packet_filter.ps1" -Reinstall'
     Pop $3
     ${If} $3 == 0
+    ${OrIf} $3 == 3010
+    ${OrIf} $3 == 1641
         WriteRegStr HKLM "Software\NekoBox" "NetworkFilterInstalled" "1"
         WriteRegStr HKLM "SYSTEM\CurrentControlSet\Services\ndisrd" "DisplayName" "Nekobox Network Filter"
         WriteRegStr HKLM "SYSTEM\CurrentControlSet\Services\ndisrd" "Description" "Nekobox Network Filter"
