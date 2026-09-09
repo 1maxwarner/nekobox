@@ -1378,8 +1378,19 @@ QJsonObject BuildTunInbound(const QStringList &directIPSets,
         "10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16",
         "127.0.0.0/8", "169.254.0.0/16", "224.0.0.0/4",
         "255.255.255.255/32"};
-    for (const auto &cidr : privateCIDRs)
-      routeExcludeAddrs.removeAll(cidr);
+    QJsonArray filteredRouteExcludeAddrs;
+    for (const auto &value : routeExcludeAddrs) {
+      bool isPrivateCidr = false;
+      for (const auto &cidr : privateCIDRs) {
+        if (value.toString() == cidr) {
+          isPrivateCidr = true;
+          break;
+        }
+      }
+      if (!isPrivateCidr)
+        filteredRouteExcludeAddrs.append(value);
+    }
+    routeExcludeAddrs = std::move(filteredRouteExcludeAddrs);
   }
   QJsonArray routeExcludeSets;
   if (dataStore->enable_tun_routing) {
