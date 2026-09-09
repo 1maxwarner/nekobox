@@ -39,6 +39,7 @@
 #endif
 
 #include <nekobox/dataStore/ResourceEntity.hpp>
+#include <nekobox/dataStore/Utils.hpp>
 #include <nekobox/sys/Settings.h>
 
 #include <nekobox/global/GuiUtils.hpp>
@@ -434,7 +435,18 @@ int main(int argc, char **argv) {
 
   // Load dataStore
   auto isLoaded = Configs::dataStore->Load();
-  if (!isLoaded) {
+  bool credentialsChanged = false;
+  if (Configs::dataStore->inbound_username.isEmpty()) {
+    Configs::dataStore->inbound_username = GetRandomString(12, ExcludeDigits);
+    credentialsChanged = true;
+  }
+  if (Configs::dataStore->inbound_password.isEmpty()) {
+    Configs::dataStore->inbound_password = GetRandomString(32);
+    credentialsChanged = true;
+  }
+  if (!isLoaded || credentialsChanged) {
+    // Persist credentials so the local mixed/SOCKS listener keeps the same
+    // authentication values across restarts and upgrades.
     Configs::dataStore->Save();
   }
 

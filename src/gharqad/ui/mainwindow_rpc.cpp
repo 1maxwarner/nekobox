@@ -5,6 +5,7 @@
 #include <nekobox/ui/mainwindow.h>
 #include <nekobox/dataStore/Database.hpp>
 #include <nekobox/configs/ConfigBuilder.hpp>
+#include <nekobox/ui/setting/GameModCatalog.h>
 #include <nekobox/sys/Settings.h>
 #include <nekobox/dataStore/Utils.hpp>
 #include <nekobox/stats/traffic/TrafficLooper.hpp>
@@ -715,17 +716,50 @@ void MainWindow::profile_start(int _id, bool do_not_test) {
         if (Configs::dataStore->spmode_packet_filter) {
             QStringList excludedProcesses{
                 QFileInfo(QCoreApplication::applicationFilePath()).fileName(),
-                "nekobox.exe", "nekobox_core.exe", "ProxiFyre.exe"};
+                "nekobox.exe", "nekobox_core.exe"};
             const auto corePath = Configs::FindCoreRealPath();
             if (!corePath.isEmpty())
                 excludedProcesses.append(QFileInfo(corePath).fileName());
+
+            const auto addUnique = [](QStringList &list, const QString &name) {
+                const auto trimmed = name.trimmed();
+                if (!trimmed.isEmpty() &&
+                    !list.contains(trimmed, Qt::CaseInsensitive))
+                    list.append(trimmed);
+            };
+
+            // The native packet filter decides which applications reach the
+            // proxy by process name; sing-box never sees the originating
+            // process in Packet Filter mode. Build the intercept list from
+            // applications routed through proxy and the bypass list from
+            // applications marked Direct.
+            QStringList includedProcesses;
+            const auto &enabledServices =
+                Configs::dataStore->routing->game_mod_enabled_services;
+            for (const auto &name :
+                 GameMod::ProcessNamesForOutbound(enabledServices, "proxy"))
+                addUnique(includedProcesses, name);
+            for (const auto &name :
+                 GameMod::ProcessNamesForOutbound(enabledServices, "direct"))
+                addUnique(excludedProcesses, name);
+
+            if (Configs::dataStore->routing->tun_split != nullptr) {
+                for (const auto &processPath :
+                     Configs::dataStore->routing->tun_split->proxy)
+                    addUnique(includedProcesses,
+                              QFileInfo(processPath).fileName());
+                for (const auto &processPath :
+                     Configs::dataStore->routing->tun_split->direct)
+                    addUnique(excludedProcesses,
+                              QFileInfo(processPath).fileName());
+            }
 
             QString filterError;
             if (!packet_filter->start(
                     Configs::dataStore->inbound_socks_port,
                     Configs::dataStore->inbound_username,
-                    Configs::dataStore->inbound_password, excludedProcesses,
-                    &filterError)) {
+                    Configs::dataStore->inbound_password, includedProcesses,
+                    excludedProcesses, &filterError)) {
                 packet_filter->stop();
                 Configs::dataStore->spmode_packet_filter = false;
                 Configs::dataStore->remember_spmode.removeAll("packet_filter");

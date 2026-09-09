@@ -459,16 +459,7 @@ jobs:
             default { throw 'Unsupported packet-filter architecture' }
           }
           $runtime = Join-Path $env:GITHUB_WORKSPACE '.packet-filter-runtime'
-          $unpack = Join-Path $env:RUNNER_TEMP 'proxifyre-runtime'
-          $archive = Join-Path $env:RUNNER_TEMP 'proxifyre.zip'
-          New-Item -ItemType Directory -Force -Path $runtime, $unpack | Out-Null
-
-          $proxifyreUrl = "https://github.com/wiresock/proxifyre/releases/download/v2.4.0/ProxiFyre-v2.4.0-$assetArch-signed.zip"
-          Invoke-WebRequest -Uri $proxifyreUrl -OutFile $archive
-          Expand-Archive -Path $archive -DestinationPath $unpack -Force
-          $helper = Get-ChildItem $unpack -Recurse -Filter ProxiFyre.exe | Select-Object -First 1
-          if (-not $helper) { throw 'ProxiFyre.exe is missing from the release archive' }
-          Copy-Item (Join-Path $helper.Directory.FullName '*') $runtime -Recurse -Force
+          New-Item -ItemType Directory -Force -Path $runtime | Out-Null
 
           $driverName = "Windows.Packet.Filter.3.6.2.1.$assetArch.msi"
           $driverUrl = "https://github.com/wiresock/ndisapi/releases/download/v3.6.2/$driverName"

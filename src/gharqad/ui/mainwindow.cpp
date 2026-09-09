@@ -1853,7 +1853,13 @@ skip_updater_hide:
       Configs::dataStore->remember_spmode.removeAll("packet_filter");
       Configs::dataStore->Save();
       MW_show_log(tr("Packet Filter stopped unexpectedly; stopping profile"));
-      profile_stop(false, false, false);
+      // Defer the stop until this timer callback has returned. Calling the
+      // asynchronous stop path re-entrantly from refresh_status() can leave
+      // queued UI work holding stale state (the observed Qt6Core c0000005).
+      QTimer::singleShot(0, this, [this]() {
+        if (running != nullptr)
+          profile_stop(false, false, false);
+      });
     }
 #endif
     refresh_status();

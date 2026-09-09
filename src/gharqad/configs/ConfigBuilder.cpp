@@ -1061,6 +1061,38 @@ static QJsonArray PrependGameModRules(
   return result;
 }
 
+static bool HasProcessSelectors(const QJsonArray &rules) {
+  for (const auto &value : rules) {
+    const auto object = value.toObject();
+    if (object.contains(QStringLiteral("process_name")) ||
+        object.contains(QStringLiteral("process_path")) ||
+        object.contains(QStringLiteral("process_path_regex")))
+      return true;
+  }
+  return false;
+}
+
+static QJsonArray BuildTunProcessRules() {
+  QJsonArray result;
+  const auto split = dataStore->routing->tun_split;
+  if (!split->proxy.isEmpty())
+    result.append(QJsonObject{{"action", "route"}, {"outbound", "proxy"},
+                              {"process_path", QListStr2QJsonArray(split->proxy)}});
+  if (!split->direct.isEmpty())
+    result.append(QJsonObject{{"action", "route"}, {"outbound", "direct"},
+                              {"process_path", QListStr2QJsonArray(split->direct)}});
+  if (!split->block.isEmpty())
+    result.append(QJsonObject{{"action", "reject"},
+                              {"process_path", QListStr2QJsonArray(split->block)}});
+  return result;
+}
+
+static bool HasTunProcessRules() {
+  const auto split = dataStore->routing->tun_split;
+  return !split->proxy.isEmpty() || !split->direct.isEmpty() ||
+         !split->block.isEmpty();
+}
+
 static QJsonArray BuildNekoboxTunRulesForFullConfig(
     const std::shared_ptr<BuildConfigStatus> &status, QJsonObject &config) {
   auto routeChain =
@@ -1127,22 +1159,13 @@ static QJsonArray BuildNekoboxTunRulesForFullConfig(
   auto routeRules = PrependGameModRules(
       routeChain->get_route_rules(false, false, outboundMap),
       gameModOutbounds);
-  auto split = dataStore->routing->tun_split;
-  if (!split->proxy.isEmpty()) {
-    routeRules += QJsonObject{{"action", "route"},
-                              {"outbound", "proxy"},
-                              {"process_path", QListStr2QJsonArray(split->proxy)}};
-  }
-  if (!split->direct.isEmpty()) {
-    routeRules += QJsonObject{
-        {"action", "route"},
-        {"outbound", "direct"},
-        {"process_path", QListStr2QJsonArray(split->direct)}};
-  }
-  if (!split->block.isEmpty()) {
-    routeRules += QJsonObject{{"action", "reject"},
-                              {"process_path", QListStr2QJsonArray(split->block)}};
-  }
+  const auto tunProcessRules = BuildTunProcessRules();
+  QJsonArray orderedRules;
+  for (const auto &rule : tunProcessRules)
+    orderedRules.append(rule);
+  for (const auto &rule : routeRules)
+    orderedRules.append(rule);
+  routeRules = orderedRules;
   return routeRules;
 }
 
@@ -1614,7 +1637,10 @@ skip_multiple_jobs:
     routeObj["auto_detect_interface"] = true;
   }
   if (!status->forTest) {
-    if (dataStore->connection_statistics) {
+    if (dataStore->connection_statistics ||
+        HasProcessSelectors(routeChain->get_route_rules(false, false, {})) ||
+        HasTunProcessRules() ||
+        !dataStore->routing->game_mod_enabled_services.isEmpty()) {
       routeObj["find_process"] = true;
     }
     routeObj["final"] = outboundIDToString(routeChain->defaultOutboundID);
@@ -1677,26 +1703,13 @@ skip_multiple_jobs:
 
     // tun process routing
     if (dataStore->spmode_vpn && !status->forTest) {
-      auto split = dataStore->routing->tun_split;
-      if (split->proxy.size() > 0) {
-        routeRules +=
-            QJsonObject({{"action", "route"},
-                         {"outbound", "proxy"},
-                         {"process_path", QListStr2QJsonArray(split->proxy)}});
-      }
-
-      if (split->direct.size() > 0) {
-        routeRules +=
-            QJsonObject({{"action", "route"},
-                         {"outbound", "direct"},
-                         {"process_path", QListStr2QJsonArray(split->direct)}});
-      }
-
-      if (split->block.size() > 0) {
-        routeRules +=
-            QJsonObject({{"action", "reject"},
-                         {"process_path", QListStr2QJsonArray(split->block)}});
-      }
+      const auto tunProcessRules = BuildTunProcessRules();
+      QJsonArray orderedRules;
+      for (const auto &rule : tunProcessRules)
+        orderedRules.append(rule);
+      for (const auto &rule : routeRules)
+        orderedRules.append(rule);
+      routeRules = orderedRules;
     }
 
     routeObj["rules"] = routeRules;

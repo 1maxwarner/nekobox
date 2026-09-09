@@ -3,29 +3,32 @@
 #ifdef Q_OS_WIN
 
 #include <nekobox/dataStore/Configs.hpp>
-#include <nekobox/sys/Settings.h>
 #include <nekobox/sys/windows/guihelper.h>
 
 #include <QCoreApplication>
 #include <QDir>
-#include <QElapsedTimer>
-#include <QFile>
 #include <QFileInfo>
-#include <QJsonArray>
-#include <QJsonDocument>
-#include <QJsonObject>
-#include <QThread>
+#include <QStandardPaths>
 
-#include <shellapi.h>
+#include <WinSock2.h>
 #include <windows.h>
+#include <shellapi.h>
+
+#include "../../../../3rdparty/packetfilter/netlib/src/proxy/socks_local_router.h"
+
+#include <optional>
+#include <string>
 
 namespace {
 
-// MSI return codes are kept local so this controller does not need to link
-// against the Windows Installer SDK just to classify a reboot requirement.
 constexpr DWORD kMsiSuccessRebootRequired = 3010;
 constexpr DWORD kMsiSuccessRebootInitiated = 1641;
-constexpr DWORD kMsiInstallFailure = 1603;
+
+QString userRuntimePath() {
+    return QDir(QStandardPaths::writableLocation(
+                    QStandardPaths::AppLocalDataLocation))
+        .filePath("packetfilter");
+}
 
 QString native(const QString &path) {
     return QDir::toNativeSeparators(QDir::cleanPath(path));
@@ -36,9 +39,17 @@ void setError(QString *error, const QString &message) {
         *error = message;
 }
 
+std::wstring processPattern(const QString &value) {
+    return value.trimmed().toStdWString();
+}
+
 } // namespace
 
 namespace Configs_sys {
+
+struct PacketFilterController::NativeState {
+    std::unique_ptr<proxy::socks_local_router> router;
+};
 
 PacketFilterController::PacketFilterController() = default;
 
@@ -46,204 +57,32 @@ PacketFilterController::~PacketFilterController() {
     stop();
 }
 
-QString PacketFilterController::findHelper(const QString &directory) const {
-    const auto helper = QDir(directory).filePath("ProxiFyre.exe");
-    return QFileInfo::exists(helper) ? native(helper) : QString();
+bool PacketFilterController::cleanupInstalledRuntime(QString *error) {
+    const QStringList paths{
+        userRuntimePath(),
+        QDir(Configs::GetBasePath()).filePath("packetfilter")};
+    for (const auto &path : paths) {
+        if (!QDir(path).exists())
+            continue;
+        if (!QDir(path).removeRecursively()) {
+            setError(error, "Cannot remove the Packet Filter runtime directory: " +
+                               native(path));
+            return false;
+        }
+    }
+    return true;
 }
 
-QString PacketFilterController::findDriverInstaller(
-    const QString &directory) const {
+QString PacketFilterController::findDriverInstaller(const QString &directory) const {
     QDir dir(directory);
     const auto installers = dir.entryList(
-        {"Windows.Packet.Filter*.msi", "*ndisapi*.msi"}, QDir::Files,
-        QDir::Name);
+        {"Windows.Packet.Filter*.msi", "*ndisapi*.msi", "*WinpkFilter*.msi"},
+        QDir::Files, QDir::Name);
     return installers.isEmpty() ? QString()
                                 : native(dir.filePath(installers.constLast()));
 }
 
-QString PacketFilterController::stageRuntime(QString *error) {
-    const auto appRuntime = QDir(QCoreApplication::applicationDirPath())
-                                .filePath("packetfilter");
-    const auto userRuntime = QDir(Configs::GetBasePath()).filePath("packetfilter");
-    const auto sourceHelper = findHelper(appRuntime);
-    const auto existingHelper = findHelper(userRuntime);
-
-    if (sourceHelper.isEmpty() && existingHelper.isEmpty()) {
-        setError(error,
-                 "ProxiFyre.exe is missing. Install the NekoBox packet-filter "
-                 "runtime beside the application.");
-        return {};
-    }
-
-    const auto sourceDriver = QDir(appRuntime).filePath("socksify.dll");
-    const auto existingDriver = QDir(userRuntime).filePath("socksify.dll");
-    if (!QFileInfo::exists(sourceDriver) && !QFileInfo::exists(existingDriver)) {
-        setError(error,
-                 "socksify.dll is missing from the packet-filter runtime.");
-        return {};
-    }
-
-    if (!QDir().mkpath(userRuntime)) {
-        setError(error, "Cannot create the packet-filter runtime directory: " +
-                           native(userRuntime));
-        return {};
-    }
-
-    // Keep a per-user copy because installed applications are often located in
-    // Program Files and cannot write app-config.json beside the executable.
-    if (!sourceHelper.isEmpty()) {
-        QDir sourceDir(appRuntime);
-        QDir destinationDir(userRuntime);
-        const auto files = sourceDir.entryList(QDir::Files | QDir::NoDotAndDotDot);
-        for (const auto &file : files) {
-            if (file == "app-config.json")
-                continue;
-            const auto source = sourceDir.filePath(file);
-            const auto destination = destinationDir.filePath(file);
-            if (QFileInfo::exists(destination) && !QFile::remove(destination)) {
-                setError(error, "Cannot replace packet-filter runtime file: " +
-                                   native(file));
-                return {};
-            }
-            if (!QFile::copy(source, destination)) {
-                setError(error, "Cannot stage packet-filter runtime file: " +
-                                   native(file));
-                return {};
-            }
-        }
-    }
-
-    const auto helper = findHelper(userRuntime);
-    if (helper.isEmpty()) {
-        setError(error, "Cannot stage ProxiFyre.exe in the writable runtime directory.");
-        return {};
-    }
-    runtimeDir = userRuntime;
-    return helper;
-}
-
-bool PacketFilterController::writeConfig(
-    const QString &directory, int socksPort,
-    const QString &username, const QString &password,
-    const QStringList &excludedProcesses, QString *error) {
-    QJsonObject proxy{
-        {"appNames", QJsonArray{QString()}},
-        {"socks5ProxyEndpoint", QString("127.0.0.1:%1").arg(socksPort)},
-        {"socks5Transport", "TCP"},
-        {"supportedProtocols", QJsonArray{"TCP", "UDP"}},
-        {"supportedAddressFamilies", QJsonArray{"IPv4", "IPv6"}},
-    };
-    if (!username.isEmpty() && !password.isEmpty()) {
-        proxy["username"] = username;
-        proxy["password"] = password;
-    }
-
-    QJsonArray excludes;
-    for (const auto &processName : excludedProcesses) {
-        if (!processName.trimmed().isEmpty())
-            excludes.append(processName.trimmed());
-    }
-
-    QJsonObject config{
-        {"logLevel", "Error"},
-        {"bypassLan", true},
-        {"proxies", QJsonArray{proxy}},
-        {"excludes", excludes},
-    };
-
-    configPath = QDir(directory).filePath("app-config.json");
-    QFile file(configPath);
-    if (!file.open(QIODevice::WriteOnly | QIODevice::Truncate)) {
-        setError(error, "Cannot write packet-filter configuration: " +
-                           native(configPath));
-        return false;
-    }
-    const auto data = QJsonDocument(config).toJson(QJsonDocument::Indented);
-    if (file.write(data) != data.size()) {
-        setError(error, "Cannot finish writing packet-filter configuration.");
-        return false;
-    }
-    return true;
-}
-
-bool PacketFilterController::startElevated(const QString &helper,
-                                           const QString &directory,
-                                           QString *error) {
-    SHELLEXECUTEINFOW executeInfo{};
-    executeInfo.cbSize = sizeof(executeInfo);
-    executeInfo.fMask = SEE_MASK_NOCLOSEPROCESS;
-    executeInfo.lpVerb = L"runas";
-    const auto helperWide = helper.toStdWString();
-    const auto directoryWide = directory.toStdWString();
-    executeInfo.lpFile = helperWide.c_str();
-    executeInfo.lpDirectory = directoryWide.c_str();
-    executeInfo.nShow = SW_HIDE;
-
-    if (!ShellExecuteExW(&executeInfo) || executeInfo.hProcess == nullptr) {
-        setError(error,
-                 "Windows refused to start the elevated packet-filter helper. "
-                 "Run NekoBox as administrator and try again.");
-        return false;
-    }
-
-    processHandle = executeInfo.hProcess;
-    // ProxiFyre is a console/service host and does not signal readiness. Give
-    // the NDIS filter a short window to attach, while still detecting an early
-    // failure such as a missing Windows Packet Filter driver.
-    QElapsedTimer timer;
-    timer.start();
-    while (timer.elapsed() < 1200) {
-        DWORD exitCode = STILL_ACTIVE;
-        if (!GetExitCodeProcess(static_cast<HANDLE>(processHandle),
-                                &exitCode) || exitCode != STILL_ACTIVE) {
-            setError(error,
-                     "The packet-filter helper exited immediately. Install the "
-                     "Windows Packet Filter driver and retry.");
-            stopUnlocked();
-            return false;
-        }
-        QThread::msleep(100);
-    }
-    return true;
-}
-
-bool PacketFilterController::startNormal(const QString &helper,
-                                         const QString &directory,
-                                         QString *error) {
-    STARTUPINFOW startupInfo{};
-    startupInfo.cb = sizeof(startupInfo);
-    PROCESS_INFORMATION processInfo{};
-    const auto helperWide = helper.toStdWString();
-    const auto directoryWide = directory.toStdWString();
-
-    if (!CreateProcessW(helperWide.c_str(), nullptr, nullptr, nullptr, FALSE,
-                        CREATE_NO_WINDOW, nullptr, directoryWide.c_str(),
-                        &startupInfo, &processInfo)) {
-        setError(error, QString("Cannot start ProxiFyre (Windows error %1).")
-                            .arg(GetLastError()));
-        return false;
-    }
-
-    CloseHandle(processInfo.hThread);
-    processHandle = processInfo.hProcess;
-    QElapsedTimer timer;
-    timer.start();
-    while (timer.elapsed() < 1200) {
-        if (WaitForSingleObject(processInfo.hProcess, 100) == WAIT_OBJECT_0) {
-            setError(error,
-                     "The packet-filter helper exited immediately. Install the "
-                     "Windows Packet Filter driver and retry.");
-            stopUnlocked();
-            return false;
-        }
-    }
-    return true;
-}
-
 bool PacketFilterController::isDriverAvailable(QString *error) const {
-    // NDISAPI exposes the NDISRD device. Checking it before starting the
-    // helper gives a deterministic message instead of silently running with
-    // no adapter interception.
     const auto device = CreateFileW(L"\\\\.\\NDISRD", GENERIC_READ | GENERIC_WRITE,
                                     FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr,
                                     OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
@@ -251,13 +90,11 @@ bool PacketFilterController::isDriverAvailable(QString *error) const {
         CloseHandle(device);
         return true;
     }
-    const auto code = GetLastError();
-    if (code == ERROR_ACCESS_DENIED)
+    if (GetLastError() == ERROR_ACCESS_DENIED)
         return true;
     setError(error,
              "Windows Packet Filter driver is not installed or is not running "
-             "(NDISRD device is unavailable). Install the NDISAPI driver and "
-             "retry.");
+             "(NDISRD device is unavailable).");
     return false;
 }
 
@@ -265,96 +102,167 @@ bool PacketFilterController::installDriver(const QString &installer,
                                            QString *error) const {
     if (installer.isEmpty()) {
         setError(error,
-                 "Windows Packet Filter driver is missing. Install the signed "
-                 "NDISAPI package or include its MSI in packetfilter/.");
+                 "Windows Packet Filter driver MSI is missing. Put the signed "
+                 "NDISAPI MSI in the packetfilter directory and retry.");
         return false;
     }
 
-    SHELLEXECUTEINFOW executeInfo{};
-    executeInfo.cbSize = sizeof(executeInfo);
-    executeInfo.fMask = SEE_MASK_NOCLOSEPROCESS;
-    executeInfo.lpVerb = L"runas";
-    executeInfo.lpFile = L"msiexec.exe";
-    const auto parameters =
-        QString("/i \"%1\" /passive /norestart").arg(installer).toStdWString();
-    executeInfo.lpParameters = parameters.c_str();
-    executeInfo.nShow = SW_HIDE;
-
-    if (!ShellExecuteExW(&executeInfo) || executeInfo.hProcess == nullptr) {
-        setError(error,
-                 "Windows refused to install the Packet Filter driver. Accept "
-                 "the UAC prompt or install the packaged MSI manually.");
+    const QString logPath = native(QDir(QFileInfo(installer).absolutePath())
+                                       .filePath("packetfilter-install.log"));
+    SHELLEXECUTEINFOW info{};
+    info.cbSize = sizeof(info);
+    info.fMask = SEE_MASK_NOCLOSEPROCESS;
+    info.lpVerb = L"runas";
+    info.lpFile = L"msiexec.exe";
+    const auto args = QString("/i \"%1\" /passive /norestart /L*V \"%2\"")
+                          .arg(installer, logPath)
+                          .toStdWString();
+    info.lpParameters = args.c_str();
+    info.nShow = SW_HIDE;
+    if (!ShellExecuteExW(&info) || info.hProcess == nullptr) {
+        setError(error, "Windows refused to install the Packet Filter driver. "
+                       "Accept the UAC prompt and retry.");
         return false;
     }
-
-    const auto waitResult = WaitForSingleObject(executeInfo.hProcess, 180000);
-    DWORD exitCode = kMsiInstallFailure;
+    const auto waitResult = WaitForSingleObject(info.hProcess, 180000);
+    DWORD exitCode = ERROR_INSTALL_FAILURE;
     if (waitResult == WAIT_OBJECT_0)
-        GetExitCodeProcess(executeInfo.hProcess, &exitCode);
-    CloseHandle(executeInfo.hProcess);
+        GetExitCodeProcess(info.hProcess, &exitCode);
+    CloseHandle(info.hProcess);
 
-    if (waitResult != WAIT_OBJECT_0) {
-        setError(error, "Timed out while installing the Packet Filter driver.");
+    if (waitResult != WAIT_OBJECT_0 ||
+        (exitCode != ERROR_SUCCESS && exitCode != kMsiSuccessRebootRequired &&
+         exitCode != kMsiSuccessRebootInitiated)) {
+        setError(error, QString("Packet Filter driver installation failed with MSI "
+                                "error %1. A detailed log was written to %2.")
+                            .arg(exitCode)
+                            .arg(logPath));
         return false;
     }
     if (exitCode == kMsiSuccessRebootRequired ||
         exitCode == kMsiSuccessRebootInitiated) {
-        setError(error,
-                 "The Packet Filter driver was installed, but Windows must be "
-                 "restarted before the mode can be enabled.");
+        setError(error, "The Packet Filter driver was installed, but Windows must "
+                       "be restarted before the mode can be enabled.");
         return false;
     }
-    if (exitCode != ERROR_SUCCESS) {
-        setError(error,
-                 QString("Packet Filter driver installation failed with MSI "
-                         "error %1.")
-                     .arg(exitCode));
-        return false;
-    }
+    return true;
+}
 
-    for (int attempt = 0; attempt < 30; ++attempt) {
-        if (isDriverAvailable(nullptr))
-            return true;
-        QThread::msleep(100);
+void PacketFilterController::renameAdapter() const {
+    const auto script = QDir(runtimeDir).filePath("rename_packet_filter.ps1");
+    if (!QFileInfo::exists(script))
+        return;
+    SHELLEXECUTEINFOW info{};
+    info.cbSize = sizeof(info);
+    info.fMask = SEE_MASK_NOCLOSEPROCESS;
+    info.lpVerb = Windows_IsInAdmin() ? nullptr : L"runas";
+    info.lpFile = L"powershell.exe";
+    const auto args = QString("-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden "
+                              "-File \"%1\"")
+                          .arg(native(script))
+                          .toStdWString();
+    info.lpParameters = args.c_str();
+    info.nShow = SW_HIDE;
+    if (ShellExecuteExW(&info) && info.hProcess != nullptr) {
+        WaitForSingleObject(info.hProcess, 30000);
+        CloseHandle(info.hProcess);
     }
-    setError(error,
-             "The Packet Filter driver installation completed, but the NDISRD "
-             "device did not become available. Restart Windows and retry.");
-    return false;
+}
+
+bool PacketFilterController::startNative(
+    int socksPort, const QString &username, const QString &password,
+    const QStringList &includedProcesses,
+    const QStringList &excludedProcesses, QString *error) {
+    try {
+        nativeState = std::make_unique<NativeState>();
+        nativeState->router = std::make_unique<proxy::socks_local_router>(
+            netlib::log::log_level::error, nullptr, nullptr,
+            false /* preserve process attribution for elevated/game mode */);
+
+        // Keep LAN bypass behavior from the previous Packet Filter mode.
+        nativeState->router->set_bypass_lan();
+
+        std::optional<std::pair<std::string, std::string>> credentials;
+        if (!username.isEmpty() && !password.isEmpty())
+            credentials = std::make_pair(username.toStdString(), password.toStdString());
+
+        const auto proxyId = nativeState->router->add_socks5_proxy(
+            QString("127.0.0.1:%1").arg(socksPort).toStdString(),
+            proxy::socks_local_router::supported_protocols::both,
+            credentials, proxy::socks_local_router::supported_address_families::all,
+            {}, false);
+        if (!proxyId) {
+            setError(error, "Cannot configure the native Packet Filter SOCKS5 endpoint.");
+            nativeState.reset();
+            return false;
+        }
+
+        if (includedProcesses.isEmpty()) {
+            if (!nativeState->router->associate_process_name_to_proxy(L"", *proxyId)) {
+                setError(error, "Cannot enable catch-all Packet Filter routing.");
+                nativeState.reset();
+                return false;
+            }
+        } else {
+            for (const auto &process : includedProcesses) {
+                if (!process.trimmed().isEmpty() &&
+                    !nativeState->router->associate_process_name_to_proxy(
+                        processPattern(process), *proxyId)) {
+                    setError(error, "Cannot configure Packet Filter process routing for " + process);
+                    nativeState.reset();
+                    return false;
+                }
+            }
+        }
+        for (const auto &process : excludedProcesses) {
+            if (!process.trimmed().isEmpty() &&
+                !nativeState->router->exclude_process_name(processPattern(process))) {
+                setError(error, "Cannot configure Packet Filter exclusion for " + process);
+                nativeState.reset();
+                return false;
+            }
+        }
+
+        if (!nativeState->router->start()) {
+            setError(error, "Native Packet Filter failed to start. Verify the NDISAPI driver and run NekoBox as administrator.");
+            nativeState.reset();
+            return false;
+        }
+        return true;
+    } catch (const std::exception &exception) {
+        setError(error, QString("Native Packet Filter initialization failed: %1")
+                            .arg(exception.what()));
+        nativeState.reset();
+        return false;
+    }
 }
 
 bool PacketFilterController::start(int socksPort, const QString &username,
                                    const QString &password,
+                                   const QStringList &includedProcesses,
                                    const QStringList &excludedProcesses,
                                    QString *error) {
     std::lock_guard<std::mutex> lock(processMutex);
-    if (isRunningUnlocked())
+    if (running)
         return true;
-    if (processHandle != nullptr) {
-        CloseHandle(static_cast<HANDLE>(processHandle));
-        processHandle = nullptr;
-    }
     if (socksPort <= 0 || socksPort > 65535) {
-        setError(error, "Invalid local SOCKS5 port for the packet filter.");
+        setError(error, "Invalid local SOCKS5 port for the Packet Filter.");
         return false;
     }
 
-    const auto helper = stageRuntime(error);
-    if (helper.isEmpty())
-        return false;
-    if (!writeConfig(runtimeDir, socksPort, username, password,
-                     excludedProcesses, error))
-        return false;
+    runtimeDir = QDir(QCoreApplication::applicationDirPath()).filePath("packetfilter");
     if (!isDriverAvailable(nullptr)) {
         const auto installer = findDriverInstaller(runtimeDir);
         if (!installDriver(installer, error))
             return false;
     }
+    renameAdapter();
+    if (!isDriverAvailable(error))
+        return false;
 
-    if (!Windows_IsInAdmin()) {
-        return startElevated(helper, runtimeDir, error);
-    }
-    return startNormal(helper, runtimeDir, error);
+    running = startNative(socksPort, username, password, includedProcesses,
+                          excludedProcesses, error);
+    return running;
 }
 
 void PacketFilterController::stop() {
@@ -364,28 +272,14 @@ void PacketFilterController::stop() {
 
 bool PacketFilterController::isRunning() const {
     std::lock_guard<std::mutex> lock(processMutex);
-    return isRunningUnlocked();
-}
-
-bool PacketFilterController::isRunningUnlocked() const {
-    if (processHandle == nullptr)
-        return false;
-    DWORD exitCode = 0;
-    return GetExitCodeProcess(static_cast<HANDLE>(processHandle), &exitCode) &&
-           exitCode == STILL_ACTIVE;
+    return running;
 }
 
 void PacketFilterController::stopUnlocked() {
-    if (processHandle == nullptr)
-        return;
-    const auto handle = static_cast<HANDLE>(processHandle);
-    DWORD exitCode = STILL_ACTIVE;
-    if (GetExitCodeProcess(handle, &exitCode) && exitCode == STILL_ACTIVE) {
-        TerminateProcess(handle, 0);
-        WaitForSingleObject(handle, 1500);
-    }
-    CloseHandle(handle);
-    processHandle = nullptr;
+    if (nativeState && nativeState->router)
+        nativeState->router->stop();
+    nativeState.reset();
+    running = false;
 }
 
 } // namespace Configs_sys
@@ -396,9 +290,11 @@ namespace Configs_sys {
 PacketFilterController::PacketFilterController() = default;
 PacketFilterController::~PacketFilterController() = default;
 bool PacketFilterController::start(int, const QString &, const QString &,
-                                   const QStringList &, QString *) { return false; }
+                                   const QStringList &, const QStringList &,
+                                   QString *) { return false; }
 void PacketFilterController::stop() {}
 bool PacketFilterController::isRunning() const { return false; }
+bool PacketFilterController::cleanupInstalledRuntime(QString *) { return false; }
 } // namespace Configs_sys
 
 #endif

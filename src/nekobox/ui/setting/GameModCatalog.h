@@ -29,6 +29,12 @@ QPixmap LoadIconAtlas(QString *error = nullptr);
 QJsonArray BuildRules(const QStringList &enabledServiceIds,
                       const QHash<QString, QString> &serviceOutbounds = {},
                       QString *error = nullptr);
+// Returns the deduplicated Windows executable names the enabled services route
+// through the given outbound ("proxy" or "direct"). Used to drive the native
+// per-application interception in Windows Packet Filter mode.
+QStringList ProcessNamesForOutbound(const QStringList &enabledServiceIds,
+                                    const QString &outbound,
+                                    QString *error = nullptr);
 QString CategoryDisplayName(const QString &category);
 
 } // namespace GameMod

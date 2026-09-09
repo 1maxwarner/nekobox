@@ -1,0 +1,1633 @@
+#pragma once
+
+#include <condition_variable>
+#include <deque>
+#include <utility>
+
+namespace proxy
+{
+    /**
+     * @class tcp_proxy_server
+     * @brief Implements a generic asynchronous TCP proxy server using I/O completion ports.
+     *
+     * This class manages the lifecycle and I/O operations of a TCP proxy server that relays connections
+     * between local clients and remote peers. It is designed to be highly scalable and efficient by leveraging
+     * Windows overlapped I/O and completion ports, and supports both IPv4 and IPv6 through its template parameter.
+     *
+     * Key features:
+     * - Listens for incoming TCP connections on a configurable port.
+     * - For each accepted connection, queries the remote peer endpoint and negotiation context using a user-supplied callback.
+     * - Establishes a connection to the remote peer and relays data between the local client and remote server.
+     * - Manages all sockets and I/O operations asynchronously using a thread pool and completion port.
+     * - Provides thread-safe management of active proxy sessions and supports dynamic cleanup of idle or closed sessions.
+     * - Integrates with a logging framework for diagnostics and debugging.
+     *
+     * Template parameter:
+     * @tparam T The proxy socket type to use for each proxied connection. Must provide:
+     *   - negotiate_context_t: Type holding negotiation context (e.g., credentials, target address).
+     *   - address_type_t: Address type (e.g., IPv4 or IPv6).
+     *   - per_io_context_t: Per-I/O context type for managing asynchronous operations.
+     *
+     * Public interface:
+     * - tcp_proxy_server(uint16_t proxy_port, winsys::io_completion_port&, std::function<query_remote_peer_t>, ...)
+     *      Constructs and initializes the proxy server, binding to the specified port.
+     * - ~tcp_proxy_server()
+     *      Cleans up all resources and stops the server.
+     * - bool start()
+     *      Starts the proxy server, accepting connections and relaying data.
+     * - void stop()
+     *      Stops the proxy server and all active sessions.
+     * - uint16_t proxy_port() const
+     *      Returns the local listening port.
+     * - std::vector<negotiate_context_t> query_current_sessions_ctx()
+     *      Returns the negotiation contexts for all active sessions.
+     *
+     * Not copyable or movable.
+     *
+     * Internal details:
+     * - Uses a vector of socket/event/context tuples to track pending and active connections.
+     * - Uses multiple threads for accepting connections, connecting to remote hosts, and cleaning up idle sessions.
+     * - Associates sockets with the I/O completion port for efficient asynchronous I/O.
+     * - Thread safety is ensured via shared_mutex and atomic flags.
+     */
+    template <typename T>
+    class tcp_proxy_server : public netlib::log::logger<tcp_proxy_server<T>>  // NOLINT(clang-diagnostic-padded)
+    {
+    public:
+        /**
+         * @brief Type alias for the logging level enumeration used by the proxy server.
+         */
+        using log_level = netlib::log::log_level;
+
+        /**
+         * @brief Type alias for the logger base class used for logging within the proxy server.
+         */
+        using logger = netlib::log::logger<tcp_proxy_server>;
+
+        /**
+         * @brief Type alias for the negotiation context type used by the proxy socket.
+         *
+         * This type holds information required for session negotiation, such as credentials or
+         * target addresses, and is defined by the proxy socket type T.
+         */
+        using negotiate_context_t = T::negotiate_context_t;
+
+        /**
+         * @brief Type alias for the address type (e.g., IPv4 or IPv6) used by the proxy socket.
+         */
+        using address_type_t = T::address_type_t;
+
+        /**
+         * @brief Type alias for the per-I/O context type used for managing asynchronous operations.
+         */
+        using per_io_context_t = T::per_io_context_t;
+
+        /**
+         * @brief Type alias for the callback function used to query remote peer information.
+         *
+         * The callback takes an address and port and returns a tuple containing the remote address,
+         * remote port, and a unique pointer to the negotiation context for the session.
+         */
+        using query_remote_peer_t = std::tuple<address_type_t, uint16_t, std::unique_ptr<negotiate_context_t>>(
+            address_type_t, uint16_t);
+
+    private:
+        /**
+         * @brief Maximum number of simultaneous connections/events the server can track.
+         *
+         * This constant defines the reserved size for the internal connection/event arrays.
+         */
+        constexpr static size_t connections_array_size = 64;
+
+        /** Number of blocking TLS/SOCKS setup operations allowed in parallel. */
+        constexpr static size_t connection_setup_worker_count = 8;
+
+        /** Maximum number of connected sockets waiting for a setup worker. */
+        constexpr static size_t connection_setup_queue_capacity = connections_array_size * 4;
+
+        /** Owns a connected socket pair until a setup worker constructs the proxy socket. */
+        struct connection_setup_task
+        {
+            connection_setup_task() = default;
+
+            connection_setup_task(const SOCKET local, const SOCKET remote,
+                std::unique_ptr<negotiate_context_t> context) noexcept
+                : local_socket(local), remote_socket(remote), negotiate_context(std::move(context))
+            {
+            }
+
+            connection_setup_task(const connection_setup_task&) = delete;
+            connection_setup_task& operator=(const connection_setup_task&) = delete;
+
+            connection_setup_task(connection_setup_task&& other) noexcept
+                : local_socket(std::exchange(other.local_socket, INVALID_SOCKET)),
+                remote_socket(std::exchange(other.remote_socket, INVALID_SOCKET)),
+                negotiate_context(std::move(other.negotiate_context))
+            {
+            }
+
+            connection_setup_task& operator=(connection_setup_task&& other) noexcept
+            {
+                if (this != &other)
+                {
+                    close();
+                    local_socket = std::exchange(other.local_socket, INVALID_SOCKET);
+                    remote_socket = std::exchange(other.remote_socket, INVALID_SOCKET);
+                    negotiate_context = std::move(other.negotiate_context);
+                }
+                return *this;
+            }
+
+            ~connection_setup_task()
+            {
+                close();
+            }
+
+            void release_sockets() noexcept
+            {
+                local_socket = INVALID_SOCKET;
+                remote_socket = INVALID_SOCKET;
+            }
+
+            SOCKET local_socket{ INVALID_SOCKET };
+            SOCKET remote_socket{ INVALID_SOCKET };
+            std::unique_ptr<negotiate_context_t> negotiate_context;
+
+        private:
+            static void close_socket(SOCKET& socket) noexcept
+            {
+                if (socket == INVALID_SOCKET)
+                    return;
+
+                shutdown(socket, SD_BOTH);
+                closesocket(socket);
+                socket = INVALID_SOCKET;
+            }
+
+            void close() noexcept
+            {
+                close_socket(local_socket);
+                close_socket(remote_socket);
+            }
+        };
+
+        /**
+         * @brief Reference to the I/O completion port used for asynchronous socket operations.
+         *
+         * This enables scalable, efficient handling of multiple concurrent I/O operations.
+         */
+        netlib::winsys::io_completion_port& completion_port_;
+
+        /**
+         * @brief Callback function to query remote peer information for each new connection.
+         *
+         * This function is invoked with the local peer's address and port, and returns a tuple
+         * containing the remote address, remote port, and a unique pointer to the negotiation context.
+         */
+        std::function<query_remote_peer_t> query_remote_peer_;
+
+        /**
+         * @brief Shared mutex for synchronizing access to internal data structures.
+         *
+         * Used to protect concurrent access to the proxy socket and event arrays.
+         */
+        std::shared_mutex lock_;
+
+        /**
+         * @brief Thread for accepting incoming client connections and dispatching them.
+         */
+        std::thread proxy_server_;
+
+        /**
+         * @brief Thread for periodically checking and cleaning up closed or idle client sessions.
+         */
+        std::thread check_clients_thread_;
+
+        /**
+         * @brief Thread for handling asynchronous connections to remote hosts.
+         */
+        std::thread connect_to_remote_host_thread_;
+
+        /** Workers that keep blocking TLS/SOCKS negotiation off the connect-event thread. */
+        std::vector<std::thread> connection_setup_workers_;
+
+        std::mutex connection_setup_lock_;
+        std::condition_variable connection_setup_cv_;
+        std::deque<connection_setup_task> connection_setup_queue_;
+
+        /**
+         * @brief Vector of active proxy socket instances, one per client session.
+         *
+         * Uses shared_ptr to enable safe concurrent access from IOCP threads.
+         * The last reference may be held by a pending I/O operation.
+         */
+        std::vector<std::shared_ptr<T>> proxy_sockets_;
+
+        /**
+         * @brief Array of tuples tracking events, sockets, and negotiation contexts for pending connections.
+         *
+         * Each tuple contains:
+         * - WSAEVENT: Event handle for overlapped I/O notification.
+         * - SOCKET:   Local client socket.
+         * - SOCKET:   Remote server socket.
+         * - std::unique_ptr<negotiate_context_t>: Negotiation context for the session.
+         */
+        std::vector<std::tuple<WSAEVENT, SOCKET, SOCKET, std::unique_ptr<negotiate_context_t>>> sock_array_events_;
+
+        /**
+         * @brief The main listening socket for incoming client connections.
+         */
+        SOCKET server_socket_{ INVALID_SOCKET };
+
+        /**
+         * @brief Completion key associated with the I/O completion port for this server.
+         */
+        ULONG_PTR completion_key_{ 0 };
+
+        /**
+         * @brief Counts the number of IOCP operations currently executing in the lambda.
+         *
+         * Incremented when entering the lambda, decremented when exiting.
+         * Used during shutdown to ensure no operations are in-flight before destroying the object.
+         */
+        std::atomic<int32_t> active_iocp_operations_{ 0 };
+
+        /**
+         * @brief The TCP port number on which the proxy server listens for incoming connections.
+         */
+        uint16_t proxy_port_;
+
+        /**
+        * @brief Atomic flag indicating whether the server is shutting down or has terminated.
+        */
+        std::atomic_bool end_server_{ true };
+
+    public:
+        /**
+         * @brief Constructs a tcp_proxy_server instance and binds it to the specified port.
+         *
+         * Initializes the TCP proxy server, sets up the I/O completion port, and prepares the
+         * callback for remote peer queries. Throws a std::runtime_error if the server socket
+         * cannot be created or bound.
+         *
+         * @param proxy_port         The TCP port number to listen on for incoming client connections.
+         * @param completion_port    Reference to the I/O completion port for asynchronous operations.
+         * @param query_remote_peer_fn
+         *        Callback function to determine the remote peer address, port, and negotiation context
+         *        for each new client connection.
+         * @param log_level          Logging level for this server instance (default: error).
+         * @param log_stream         Optional output stream for logging (default: std::nullopt).
+         *
+         * @throws std::runtime_error if the server socket cannot be created or bound.
+         */
+        tcp_proxy_server(const uint16_t proxy_port, netlib::winsys::io_completion_port& completion_port,
+            const std::function<query_remote_peer_t>& query_remote_peer_fn,
+            const log_level log_level = log_level::error,
+            std::shared_ptr<std::ostream> log_stream = nullptr)
+            : logger(log_level, std::move(log_stream)),
+            completion_port_(completion_port),
+            query_remote_peer_(query_remote_peer_fn),
+            proxy_port_(proxy_port)
+        {
+            if (!create_server_socket())
+            {
+                throw std::runtime_error("tcp_proxy_server: failed to create server socket.");
+            }
+        }
+
+        /**
+         * @brief Destructor for the tcp_proxy_server class.
+         *
+         * Cleans up resources by shutting down and closing the server socket if it is still open.
+         * If the server is still running, calls stop() to ensure all threads and sessions are properly terminated.
+         */
+        ~tcp_proxy_server()
+        {
+            if (server_socket_ != static_cast<SOCKET>(INVALID_SOCKET))
+            {
+                shutdown(server_socket_, SD_BOTH);
+                closesocket(server_socket_);
+                server_socket_ = INVALID_SOCKET;
+            }
+
+            if (end_server_ == false)
+                stop();
+        }
+
+        /**
+         * @brief Deleted copy constructor to prevent copying of tcp_proxy_server instances.
+         */
+        tcp_proxy_server(const tcp_proxy_server& other) = delete;
+
+        /**
+         * @brief Deleted move constructor to prevent moving of tcp_proxy_server instances.
+         */
+        tcp_proxy_server(tcp_proxy_server&& other) noexcept = delete;
+
+        /**
+         * @brief Deleted copy assignment operator to prevent copying of tcp_proxy_server instances.
+         */
+        tcp_proxy_server& operator=(const tcp_proxy_server& other) = delete;
+
+        /**
+         * @brief Deleted move assignment operator to prevent moving of tcp_proxy_server instances.
+         */
+        tcp_proxy_server& operator=(tcp_proxy_server&& other) noexcept = delete;
+
+        /**
+         * @brief Returns the TCP port number on which the proxy server is listening.
+         * @return The local proxy port number.
+         */
+        [[nodiscard]] uint16_t proxy_port() const
+        {
+            return proxy_port_;
+        }
+
+        /**
+         * @brief Starts the TCP proxy server and its worker threads.
+         *
+         * This method initializes the server for accepting new client connections and relaying data.
+         * It performs the following steps:
+         * - Checks if the server is already running; if so, returns true immediately.
+         * - Reserves space for connection events and sockets.
+         * - Creates the initial event and socket tuple for accepting connections.
+         * - Associates the listening socket with the I/O completion port and sets up the callback handler.
+         * - If association fails, cleans up resources and returns false.
+         * - Launches the main proxy server thread, client cleanup thread, and remote host connection thread.
+         *
+         * @return true if the server was started successfully or is already running; false if initialization failed.
+         */
+        bool start()
+        {
+            if (end_server_ == false)
+            {
+                // already running
+                return true;
+            }
+
+            end_server_ = false;
+
+            // A prior stop() closes and INVALIDATES the listening socket, but it is created only
+            // in the constructor (create_server_socket()). The router reuses the same
+            // tcp_proxy_server objects across stop()/start() cycles, so without recreating the
+            // socket here start() would relaunch the worker threads around INVALID_SOCKET and the
+            // accept loop (WSAAccept) would exit immediately -- a "running" server that silently
+            // accepts nothing. Recreate it (and fail start() if that fails).
+            if (server_socket_ == static_cast<SOCKET>(INVALID_SOCKET))
+            {
+                if (!create_server_socket())
+                {
+                    NETLIB_ERROR("tcp_proxy_server::start: failed to recreate the listening socket");
+                    end_server_ = true;
+                    return false;
+                }
+            }
+
+            sock_array_events_.reserve(connections_array_size);
+
+            sock_array_events_.push_back(std::make_tuple(WSACreateEvent(),
+                                                         WSASocket(address_type_t::af_type, SOCK_STREAM,
+                                                                   IPPROTO_TCP, nullptr, 0,
+                                                                   WSA_FLAG_OVERLAPPED), INVALID_SOCKET, nullptr));
+
+            if (std::get<1>(sock_array_events_[0]) != INVALID_SOCKET)
+            {
+                auto [success, io_key] = completion_port_.associate_socket(
+                    std::get<1>(sock_array_events_[0]),
+                    [this](const DWORD num_bytes, OVERLAPPED* povlp, const BOOL status)
+                    {
+                        // Increment active operations counter on entry
+                        active_iocp_operations_.fetch_add(1, std::memory_order_acquire);
+                        
+                        // RAII guard to ensure we decrement on all exit paths (including exceptions)
+                        // Non-copyable/non-moveable to prevent double-decrement bugs
+                        struct operation_guard {
+                            std::atomic<int32_t>& counter;
+                            
+                            explicit operation_guard(std::atomic<int32_t>& c) : counter(c) {}
+                            
+                            ~operation_guard() {
+                                counter.fetch_sub(1, std::memory_order_release);
+                            }
+                            
+                            // Delete copy and move to satisfy Rule of 5
+                            operation_guard(const operation_guard&) = delete;
+                            operation_guard(operation_guard&&) = delete;
+                            operation_guard& operator=(const operation_guard&) = delete;
+                            operation_guard& operator=(operation_guard&&) = delete;
+                        } guard{ active_iocp_operations_ };
+
+                        auto io_context = static_cast<per_io_context_t*>(povlp);
+
+                        // Acquire the socket's strong reference under a SHARED server lock so
+                        // this read is serialized with clear_thread's release_self_references(),
+                        // which resets the same shared_ptr while clear_thread holds the EXCLUSIVE
+                        // server lock_. That removes the data race on the shared_ptr and prevents
+                        // the object being released/destroyed between this read and its use; the
+                        // captured strong ref then keeps the object alive for the rest of the
+                        // callback. A relay/negotiate context whose socket already released its
+                        // self-references reads null and safely no-ops; inject_io_write contexts
+                        // are heap-owned and always carry a strong ref, so they are still handled.
+                        decltype(io_context->proxy_socket_ptr) proxy_socket;
+                        proxy_io_operation io_operation;
+                        {
+                            std::shared_lock lock(lock_);
+                            proxy_socket = io_context->proxy_socket_ptr;
+                            io_operation = io_context->io_operation;
+                        }
+                        if (!proxy_socket && io_operation != proxy_io_operation::inject_io_write)
+                            return true;
+
+                        // Balance the io_posted() done when this overlapped op was posted: this
+                        // completion is a real delivery, so decrement the socket's outstanding-I/O
+                        // count exactly once on every exit path (error return, dispatch, throw).
+                        // For a counted relay/negotiate completion proxy_socket is always non-null
+                        // here (the early-return above drops null relay/negotiate contexts, and a
+                        // self-reference cannot have been released while the count is non-zero), so
+                        // the guard always decrements it. inject_io_write is currently unused, but
+                        // its heap context now carries a real shared_from_this() ref, so if revived
+                        // the guard would find a non-null proxy_socket and correctly balance the
+                        // inline io_posted(); the null tolerance is only a defensive fallback.
+                        using io_dec_socket_t = decltype(proxy_socket.get());
+                        struct io_dec_guard {
+                            io_dec_socket_t s;
+                            explicit io_dec_guard(io_dec_socket_t sock) : s(sock) {}
+                            ~io_dec_guard() { if (s) s->io_completed(); }
+                            io_dec_guard(const io_dec_guard&) = delete;
+                            io_dec_guard(io_dec_guard&&) = delete;
+                            io_dec_guard& operator=(const io_dec_guard&) = delete;
+                            io_dec_guard& operator=(io_dec_guard&&) = delete;
+                        } io_dec{ proxy_socket.get() };
+
+                        // Honor shutdown only after the decrement guard is armed: bailing here
+                        // (instead of before acquiring proxy_socket) still balances this
+                        // completion's io_posted() via io_dec, so a completion delivered while
+                        // stop() runs cannot leave outstanding_io_ stuck non-zero. We hold a strong
+                        // ref so io_context stays valid, and we still start no new work below.
+                        if (end_server_.load(std::memory_order_acquire))
+                            return false;
+
+                        if (!status || (status && (num_bytes == 0)))
+                        {
+                            if ((io_operation == proxy_io_operation::relay_io_read) ||
+                                (io_operation == proxy_io_operation::negotiate_io_read))
+                            {
+                                // A graceful FIN (status == true, 0 bytes) on the DATA relay path is
+                                // a half-close: do NOT hard-close, which would CancelIoEx an in-flight
+                                // send and truncate already-received data. Drain it instead. Hard
+                                // errors (status == false) and any 0-byte negotiation read still abort
+                                // immediately.
+                                if (status && io_operation == proxy_io_operation::relay_io_read)
+                                {
+                                    proxy_socket->on_peer_read_shutdown(io_context->is_local);
+                                    return false;
+                                }
+
+                                proxy_socket->close_client(true, io_context->is_local);
+                                return false;
+                            }
+
+                            if (!status)
+                            {
+                                proxy_socket->close_client(false, io_context->is_local);
+                                return false;
+                            }
+                        }
+
+                        switch (io_operation)
+                        {
+                        case proxy_io_operation::relay_io_read:
+                            proxy_socket->process_receive_buffer_complete(num_bytes, io_context);
+                            break;
+
+                        case proxy_io_operation::relay_io_write:
+                            proxy_socket->process_send_buffer_complete(num_bytes, io_context);
+                            break;
+
+                        case proxy_io_operation::negotiate_io_read:
+                            proxy_socket->process_receive_negotiate_complete(num_bytes, io_context);
+                            break;
+
+                        case proxy_io_operation::negotiate_io_write:
+                            proxy_socket->process_send_negotiate_complete(num_bytes, io_context);
+                            break;
+
+                        case proxy_io_operation::inject_io_write:
+                            T::process_inject_buffer_complete(io_context);
+                            break;
+                        default: break; // NOLINT(clang-diagnostic-covered-switch-default)
+                        }
+
+                        return true;
+                    });
+
+                if (success == true)
+                {
+                    completion_key_ = io_key;
+                }
+                else
+                {
+                    if (std::get<0>(sock_array_events_[0]) != INVALID_HANDLE_VALUE)
+                    {
+                        WSACloseEvent(std::get<0>(sock_array_events_[0]));
+                    }
+
+                    if (std::get<1>(sock_array_events_[0]) != INVALID_SOCKET)
+                    {
+                        closesocket(std::get<1>(sock_array_events_[0]));
+                    }
+
+                    sock_array_events_.clear();
+                    end_server_ = true;
+                    return false;
+                }
+            }
+            else
+            {
+                // The throwaway registration socket could not be created, so no IOCP completion
+                // handler was registered and completion_key_ is unset. Launching the workers now
+                // would produce an inert server: every session's overlapped I/O would post but
+                // never complete, so outstanding_io_ never drains and sessions pin forever. Treat
+                // this exactly like an association failure and fail start().
+                NETLIB_ERROR("tcp_proxy_server::start: failed to create IOCP registration socket");
+                if (std::get<0>(sock_array_events_[0]) != WSA_INVALID_EVENT)
+                {
+                    WSACloseEvent(std::get<0>(sock_array_events_[0]));
+                }
+                sock_array_events_.clear();
+                end_server_ = true;
+                return false;
+            }
+
+            try
+            {
+                connection_setup_workers_.reserve(connection_setup_worker_count);
+                for (size_t i = 0; i < connection_setup_worker_count; ++i)
+                {
+                    connection_setup_workers_.emplace_back(
+                        &tcp_proxy_server::connection_setup_worker, this);
+                }
+
+                // Start accepting only after both setup dispatch stages are available.
+                connect_to_remote_host_thread_ =
+                    std::thread(&tcp_proxy_server::connect_to_remote_host_thread, this);
+                check_clients_thread_ = std::thread(&tcp_proxy_server::clear_thread, this);
+                proxy_server_ = std::thread(&tcp_proxy_server::start_proxy_thread, this);
+            }
+            catch (const std::exception& e)
+            {
+                NETLIB_ERROR("tcp_proxy_server::start: failed to launch worker threads: {}", e.what());
+                stop();
+                return false;
+            }
+            catch (...)
+            {
+                NETLIB_ERROR("tcp_proxy_server::start: failed to launch worker threads: unknown exception");
+                stop();
+                return false;
+            }
+
+            return true;
+        }
+
+        /**
+         * @brief Stops the TCP proxy server and cleans up all resources.
+         *
+         * This method performs a graceful shutdown of the proxy server by:
+         * 1. Setting the end_server_ flag to signal shutdown
+         * 2. Closing the server socket, which causes pending accept/I/O to complete with error
+         * 3. Joining the worker threads so no new session is accepted/connected during teardown
+         * 4. Cancelling each proxy socket's pending I/O (close_client) so its posted operations abort
+         * 5. Waiting for every proxy socket's overlapped I/O to drain (per-socket outstanding count)
+         *    and for all IOCP callbacks to finish, then unregistering the IOCP handler
+         * 6. Releasing each socket's self-references and clearing the vector so the sockets destruct
+         *    (skipped on drain timeout to avoid freeing an io_context under an in-flight completion)
+         *
+         * The IOCP thread pool itself is managed by io_completion_port and will be 
+         * properly shut down when the completion port is destroyed.
+         *
+         * If the server is already stopped, this method returns immediately.
+         */
+        void stop()
+        {
+            if (end_server_ == true)
+            {
+                // already stopped
+                return;
+            }
+
+            // Step 1: Signal shutdown. Setup workers leave queued tasks untouched so stop() can
+            // close those socket pairs after every in-progress setup has returned.
+            end_server_ = true;
+            connection_setup_cv_.notify_all();
+
+            // Step 2: Close server socket
+            // This causes any pending accept/I/O operations to complete immediately with an error.
+            // When IOCP threads wake up, they'll see end_server_ == true and return false.
+            if (server_socket_ != INVALID_SOCKET)
+            {
+                closesocket(server_socket_);
+                server_socket_ = INVALID_SOCKET;
+            }
+
+            {
+                std::unique_lock lock(lock_);
+                if (!sock_array_events_.empty() && std::get<0>(sock_array_events_[0]) != WSA_INVALID_EVENT)
+                    ::WSASetEvent(std::get<0>(sock_array_events_[0]));
+            }
+
+            // The IOCP handler stays registered until AFTER the drain below: close_client()'s aborted
+            // completions must still dispatch through it to release and decrement outstanding_io_,
+            // exactly as in the SOCKS5 UDP server. Unregistering here (as the old code did) would drop
+            // those completions, so outstanding_io_ would never reach zero and the drain would hang.
+
+            using namespace std::chrono_literals;
+
+            // Step 3: Quiesce every producer before tearing sessions down. The connect-event thread
+            // stops adding setup tasks, then setup workers finish any operation already in progress.
+            // This guarantees no socket can be published after the I/O drain begins.
+            if (proxy_server_.joinable())
+            {
+                proxy_server_.join();
+            }
+            if (connect_to_remote_host_thread_.joinable())
+            {
+                connect_to_remote_host_thread_.join();
+            }
+            for (auto& worker : connection_setup_workers_)
+            {
+                if (worker.joinable())
+                    worker.join();
+            }
+            connection_setup_workers_.clear();
+
+            {
+                std::unique_lock lock(connection_setup_lock_);
+                connection_setup_queue_.clear();
+            }
+
+            // Also handles a partial start() where the connect-event thread was never launched.
+            close_pending_connections();
+
+            if (check_clients_thread_.joinable())
+            {
+                check_clients_thread_.join();
+            }
+
+            // Step 4: Cancel every proxy socket's pending I/O so its posted operations complete
+            // (aborted) and stop pinning the socket. Keep the sockets in the vector for now -- they
+            // must stay alive until their in-flight completions drain. Merely clearing the vector
+            // does NOT destroy them: each socket's io_context members self-reference it, so the
+            // destructor would never run and the socket handles / armed recv would leak.
+            {
+                std::unique_lock lock(lock_);
+                for (auto& entry : proxy_sockets_)
+                {
+                    if (entry)
+                    {
+                        entry->close_client(false, true);  // close local (also closes remote)
+                        entry->close_client(false, false); // ensure remote closed if local was already invalid
+                    }
+                }
+            }
+
+            // Step 5: Wait until every proxy socket has drained all posted overlapped I/O
+            // (outstanding_io_ == 0) AND no IOCP callback is still running. BOTH conditions are
+            // load-bearing:
+            //  (a) a cancelled completion may be queued but not yet dispatched while
+            //      active_iocp_operations_ momentarily reads zero -- so we gate on the per-socket
+            //      count too, else a still-queued completion would touch a freed io_context; and
+            //  (b) a completion that entered the lambda just before end_server_ was set can re-post
+            //      I/O (io_posted -> outstanding_io_ +1) AFTER we read that socket's count as zero.
+            //      That re-post happens strictly inside the lambda body, where active_iocp_operations_
+            //      is >= 1 (decremented only at scope exit, after the re-post), so requiring
+            //      active_iocp_operations_ == 0 keeps the combined gate closed until no lambda is
+            //      mid-dispatch. (This holds only because every re-post site runs inside the lambda.)
+            // Releasing a socket's self-references while either could still reference its io_context
+            // would free it out from under a completion. Exponential backoff to avoid busy-waiting.
+            int wait_iterations = 0;
+            bool drained_ok = false;
+
+            while (true)
+            {
+                bool drained = true;
+                {
+                    std::unique_lock lock(lock_);
+                    for (auto& entry : proxy_sockets_)
+                    {
+                        if (entry && entry->outstanding_io() != 0)
+                        {
+                            drained = false;
+                            entry->close_client(false, true);  // idempotent re-cancel
+                            entry->close_client(false, false);
+                        }
+                    }
+                }
+
+                if (drained && active_iocp_operations_.load(std::memory_order_acquire) == 0)
+                {
+                    drained_ok = true;
+                    break;
+                }
+
+                if (constexpr int max_wait_iterations = 100; ++wait_iterations > max_wait_iterations)
+                {
+                    NETLIB_ERROR("Timeout waiting for proxy socket I/O to drain (active operations: {}); "
+                        "leaving sessions pinned to avoid freeing in-flight io_contexts",
+                        active_iocp_operations_.load(std::memory_order_relaxed));
+                    break;
+                }
+
+                // Exponential backoff: 1ms, 2ms, 4ms, 8ms, ... up to 100ms
+                const auto wait_time = std::min(1ms * (1 << std::min(wait_iterations / 10, 6)), 100ms);
+                std::this_thread::sleep_for(wait_time);
+            }
+
+            // Step 5b: Ensure no IOCP callback is still executing (it captures `this`) before we
+            // proceed, closing the server-UAF window on the timeout path. Lambdas are bounded work,
+            // so this reliably reaches zero; bound it as a last resort.
+            for (int active_wait = 0;
+                 active_iocp_operations_.load(std::memory_order_acquire) != 0;
+                 ++active_wait)
+            {
+                if (active_wait > 200)
+                {
+                    NETLIB_ERROR("IOCP callbacks still active ({}) after drain; proceeding may be unsafe",
+                        active_iocp_operations_.load(std::memory_order_relaxed));
+                    break;
+                }
+                std::this_thread::sleep_for(std::min(1ms * (1 << std::min(active_wait / 10, 6)), 100ms));
+            }
+
+            // Step 6: All completions processed (or timed out) -- unregister the IOCP handler so no
+            // further completion dispatches into this server.
+            if (completion_key_ != 0)
+            {
+                (void)completion_port_.unregister_handler(completion_key_);
+                completion_key_ = 0;
+            }
+
+            // Step 7: Clear resources. Only if the drain completed do we break each socket's
+            // self-references and clear the vector so the sockets (and their io_contexts) destruct.
+            // If the drain timed out, some op is still outstanding; releasing/clearing then would
+            // free an io_context a still-queued completion could dereference, so we deliberately
+            // leak those sessions instead (a bounded, shutdown-only leak) rather than risk a UAF.
+            {
+                std::unique_lock lock(lock_);
+
+                if (!sock_array_events_.empty())
+                {
+                    sock_array_events_.clear();
+                }
+
+                if (drained_ok && !proxy_sockets_.empty())
+                {
+                    for (auto& entry : proxy_sockets_)
+                    {
+                        if (entry)
+                            entry->release_self_references();
+                    }
+                    proxy_sockets_.clear();
+                }
+            }
+
+            // Note: The IOCP thread pool itself is managed by completion_port_ and will be
+            // properly shut down when io_completion_port's destructor is called.
+        }
+
+        /**
+         * @brief Retrieves the negotiation contexts for all active proxy sessions.
+         *
+         * This method acquires a shared lock to ensure thread-safe access to the internal
+         * proxy socket list. It then iterates over all active proxy socket instances and
+         * extracts their negotiation context, returning a vector of these contexts.
+         *
+         * @return std::vector<negotiate_context_t> containing the negotiation context for each active session.
+         */
+        std::vector<negotiate_context_t> query_current_sessions_ctx()
+        {
+            std::shared_lock lock(lock_);
+            std::vector<negotiate_context_t> result;
+            result.reserve(proxy_sockets_.size());
+
+            std::transform(proxy_sockets_.cbegin(), proxy_sockets_.cend(), std::back_inserter(result), [](auto&& e)
+                {
+                    return *reinterpret_cast<negotiate_context_t*>(e->get_negotiate_ctx());
+                });
+
+            return result;
+        }
+
+    private:
+        // ********************************************************************************
+        /// <summary>
+        /// Queries remote host information for an outgoing connection by a locally accepted socket.
+        /// </summary>
+        /// <param name="accepted">The locally accepted TCP socket for which to query remote peer information.</param>
+        /// <returns>
+        /// A tuple containing:
+        ///   - The remote peer address (address_type_t)
+        ///   - The remote peer port (uint16_t)
+        ///   - A unique pointer to the negotiation context (std::unique_ptr<negotiate_context_t>)
+        /// If the query fails, returns a tuple with default-constructed values.
+        /// </returns>
+        // ********************************************************************************
+        std::tuple<address_type_t, uint16_t, std::unique_ptr<negotiate_context_t>> get_remote_peer(
+            const SOCKET accepted) const
+        {
+            SOCKADDR_STORAGE name;
+            int len = sizeof(SOCKADDR_STORAGE);
+
+            if (!getpeername(accepted, reinterpret_cast<sockaddr*>(&name), &len))
+            {
+                uint16_t accepted_peer_port = 0;
+                address_type_t accepted_peer_address{};
+
+                if constexpr (address_type_t::af_type == AF_INET)
+                {
+                    accepted_peer_port = ntohs(reinterpret_cast<sockaddr_in*>(&name)->sin_port);
+                    accepted_peer_address = address_type_t(reinterpret_cast<sockaddr_in*>(&name)->sin_addr);
+                }
+                else if constexpr (address_type_t::af_type == AF_INET6)
+                {
+                    accepted_peer_port = ntohs(reinterpret_cast<sockaddr_in6*>(&name)->sin6_port);
+                    accepted_peer_address = address_type_t(reinterpret_cast<sockaddr_in6*>(&name)->sin6_addr);
+                }
+                else
+                {
+                    static_assert(false_v<T>, "Unsupported address family used as a template parameter!");
+                }
+
+                if (query_remote_peer_)
+                {
+                    return query_remote_peer_(accepted_peer_address, accepted_peer_port);
+                }
+            }
+            else
+            {
+                return std::make_tuple(address_type_t{}, 0, nullptr);
+            }
+
+            return std::make_tuple(address_type_t{}, 0, nullptr);
+        }
+
+        /**
+         * @brief Creates and binds the server's listening socket.
+         *
+         * This method creates a new overlapped TCP socket using the address family specified by
+         * address_type_t. It then binds the socket to the configured proxy port and any local address
+         * (IPv4 or IPv6, depending on the template parameter). If the port is set to 0, the method
+         * retrieves the actual port assigned by the system after binding. Finally, it puts the socket
+         * into listening mode for incoming connections.
+         *
+         * If any step fails, the socket is closed and the method returns false.
+         *
+         * @return true if the server socket was successfully created, bound, and set to listen; false otherwise.
+         */
+        bool create_server_socket()
+        {
+            server_socket_ = WSASocket(address_type_t::af_type, SOCK_STREAM, IPPROTO_TCP, nullptr, 0,
+                WSA_FLAG_OVERLAPPED);
+
+            if (server_socket_ == static_cast<SOCKET>(INVALID_SOCKET))
+            {
+                return false;
+            }
+
+            if constexpr (address_type_t::af_type == AF_INET)
+            {
+                sockaddr_in service{};
+                service.sin_family = address_type_t::af_type;
+                service.sin_addr.s_addr = INADDR_ANY;
+                service.sin_port = htons(proxy_port_);
+
+                if (const auto status = bind(server_socket_, reinterpret_cast<SOCKADDR*>(&service), sizeof(service));
+                    status == SOCKET_ERROR)
+                {
+                    closesocket(server_socket_);
+                    server_socket_ = INVALID_SOCKET;
+                    return false;
+                }
+
+                if (proxy_port_ == 0)
+                {
+                    int name_length = sizeof(service);
+                    if (0 == getsockname(server_socket_, reinterpret_cast<SOCKADDR*>(&service), &name_length))
+                    {
+                        proxy_port_ = ntohs(service.sin_port);
+                    }
+                    else
+                    {
+                        closesocket(server_socket_);
+                        server_socket_ = INVALID_SOCKET;
+                        return false;
+                    }
+                }
+            }
+            else
+            {
+                sockaddr_in6 service{};
+                service.sin6_family = address_type_t::af_type;
+                service.sin6_addr = in6addr_any;
+                service.sin6_port = htons(proxy_port_);
+
+                if (const auto status = bind(server_socket_, reinterpret_cast<SOCKADDR*>(&service), sizeof(service));
+                    status == SOCKET_ERROR)
+                {
+                    closesocket(server_socket_);
+                    server_socket_ = INVALID_SOCKET;
+                    return false;
+                }
+
+                if (proxy_port_ == 0)
+                {
+                    int name_length = sizeof(service);
+                    if (0 == getsockname(server_socket_, reinterpret_cast<SOCKADDR*>(&service), &name_length))
+                    {
+                        proxy_port_ = ntohs(service.sin6_port);
+                    }
+                    else
+                    {
+                        closesocket(server_socket_);
+                        server_socket_ = INVALID_SOCKET;
+                        return false;
+                    }
+                }
+            }
+
+            if (const auto status = listen(server_socket_, SOMAXCONN); status == SOCKET_ERROR)
+            {
+                closesocket(server_socket_);
+                server_socket_ = INVALID_SOCKET;
+                return false;
+            }
+
+            return true;
+        }
+
+        /**
+         * @brief Establishes an asynchronous connection to a remote host for a given accepted client socket.
+         *
+         * This method performs the following steps:
+         * - Queries the remote peer address, port, and negotiation context using get_remote_peer().
+         * - If the remote port is invalid, returns false.
+         * - Creates a new overlapped socket for the remote connection.
+         * - Binds the remote socket to an ephemeral local port and any local address (IPv4 or IPv6).
+         * - Sets the remote socket to non-blocking mode.
+         * - Registers the remote socket and associated event/context in the internal tracking array.
+         * - Initiates a non-blocking connect() to the remote peer.
+         * - If the connection fails immediately (other than WSAEWOULDBLOCK), cleans up and returns false.
+         *
+         * @param accepted The accepted client SOCKET for which to establish a remote connection.
+         * @return true if the connection initiation was successful; false otherwise.
+         */
+        bool connect_to_remote_host(SOCKET accepted)
+        {
+            auto [remote_ip, remote_port, negotiate_ctx] = get_remote_peer(accepted);
+
+            if (!remote_port)
+            {
+                NETLIB_WARNING("connect_to_remote_host: Invalid remote port (0) - rejecting connection");
+                return false;
+            }
+
+            NETLIB_DEBUG("connect_to_remote_host: Connecting to {}:{}", remote_ip, remote_port);
+
+            auto remote_socket = WSASocket(address_type_t::af_type, SOCK_STREAM, IPPROTO_TCP, nullptr, 0,
+                WSA_FLAG_OVERLAPPED);
+
+            if (remote_socket == INVALID_SOCKET)
+            {
+                NETLIB_ERROR("connect_to_remote_host: Failed to create remote socket: {}", WSAGetLastError());
+                return false;
+            }
+
+            if constexpr (address_type_t::af_type == AF_INET)
+            {
+                sockaddr_in sa_local{};
+                sa_local.sin_family = address_type_t::af_type;
+                sa_local.sin_port = htons(0);
+                sa_local.sin_addr.s_addr = htonl(INADDR_ANY);
+
+                // bind socket's name
+                const auto status = bind(remote_socket, reinterpret_cast<sockaddr*>(&sa_local), sizeof(sa_local));
+
+                if (status == SOCKET_ERROR)
+                {
+                    const auto error = WSAGetLastError();
+                    NETLIB_ERROR("connect_to_remote_host: Failed to bind IPv4 remote socket: {}", error);
+                    shutdown(remote_socket, SD_BOTH);
+                    closesocket(remote_socket);
+                    return false;
+                }
+            }
+            else
+            {
+                // Allow this AF_INET6 upstream socket to reach IPv4 SOCKS5 servers
+                // via IPv4-mapped addresses (e.g. ::ffff:127.0.0.1). ProxiFyre's
+                // IPv6 proxy path targets the configured (often IPv4) SOCKS5 server
+                // through its v4-mapped form, so the socket must be dual-stack.
+                constexpr DWORD v6_only = 0;
+                if (setsockopt(remote_socket, IPPROTO_IPV6, IPV6_V6ONLY,
+                    reinterpret_cast<const char*>(&v6_only), sizeof(v6_only)) == SOCKET_ERROR)
+                {
+                    NETLIB_WARNING("connect_to_remote_host: Failed to clear IPV6_V6ONLY on remote socket: {}",
+                        WSAGetLastError());
+                    // Continue: a v6-only socket still works for genuine IPv6 upstreams.
+                }
+
+                sockaddr_in6 sa_local{};
+                sa_local.sin6_family = address_type_t::af_type;
+                sa_local.sin6_port = htons(0);
+                sa_local.sin6_addr = in6addr_any;
+
+                // bind socket's name
+                const auto status = bind(remote_socket, reinterpret_cast<sockaddr*>(&sa_local), sizeof(sa_local));
+
+                if (status == SOCKET_ERROR)
+                {
+                    const auto error = WSAGetLastError();
+                    NETLIB_ERROR("connect_to_remote_host: Failed to bind IPv6 remote socket: {}", error);
+                    shutdown(remote_socket, SD_BOTH);
+                    closesocket(remote_socket);
+                    return false;
+                }
+            }
+
+            // enable non-blocking mode
+            u_long mode = 1;
+            auto ret = ioctlsocket(remote_socket, FIONBIO, &mode);
+            if (ret != 0)
+            {
+                const auto error = WSAGetLastError();
+                NETLIB_WARNING("connect_to_remote_host: Failed to set non-blocking mode: {}", error);
+                // Continue anyway, as this might not be critical
+            }
+
+            // The client_service structure specifies the address family,
+            // IP address, and port of the server to be connected to.
+            WSAEVENT tracked_event;
+            {
+                std::scoped_lock lock(lock_);
+
+                if (sock_array_events_.size() >= connections_array_size - 1)
+                {
+                    NETLIB_WARNING("connect_to_remote_host: Socket array full, cannot add new connection");
+                    shutdown(remote_socket, SD_BOTH);
+                    closesocket(remote_socket);
+                    return false;
+                }
+
+                sock_array_events_.push_back(
+                    std::make_tuple(WSACreateEvent(), accepted, remote_socket, std::move(negotiate_ctx)));
+
+                if (std::get<0>(sock_array_events_.back()) == WSA_INVALID_EVENT)
+                {
+                    NETLIB_ERROR("connect_to_remote_host: Failed to create WSA event: {}", WSAGetLastError());
+                    sock_array_events_.pop_back();
+                    shutdown(remote_socket, SD_BOTH);
+                    closesocket(remote_socket);
+                    return false;
+                }
+
+                if (WSAEventSelect(remote_socket, std::get<0>(sock_array_events_.back()), FD_CONNECT) == SOCKET_ERROR)
+                {
+                    const auto error = WSAGetLastError();
+                    NETLIB_WARNING("connect_to_remote_host: WSAEventSelect failed: {}", error);
+                    WSACloseEvent(std::get<0>(sock_array_events_.back()));
+                    sock_array_events_.pop_back();
+                    shutdown(remote_socket, SD_BOTH);
+                    closesocket(remote_socket);
+                    return false;
+                }
+
+                // Remember the event we just tracked so a synchronous connect() failure below can
+                // find and erase this entry (see undo_pending_entry).
+                tracked_event = std::get<0>(sock_array_events_.back());
+
+                WSASetEvent(std::get<0>(sock_array_events_[0]));
+            }
+
+            // If connect() fails synchronously (below) the entry pushed above would otherwise
+            // linger forever: its event is never signaled (the socket is closed), so it
+            // permanently occupies one of the limited slots and leaks the WSAEVENT. After
+            // connections_array_size such failures the server rejects every new connection until
+            // it is restarted. Erase our entry on those paths.
+            auto undo_pending_entry = [this, tracked_event]() -> bool
+            {
+                std::scoped_lock lock(lock_);
+                for (auto it = sock_array_events_.begin(); it != sock_array_events_.end(); ++it)
+                {
+                    if (std::get<0>(*it) == tracked_event)
+                    {
+                        WSACloseEvent(std::get<0>(*it));
+                        sock_array_events_.erase(it);
+                        return true;
+                    }
+                }
+                return false;
+            };
+
+            NETLIB_DEBUG("connect_to_remote_host: Initiating connection to {}:{}", remote_ip, remote_port);
+
+            // connect to server
+            if constexpr (address_type_t::af_type == AF_INET)
+            {
+                sockaddr_in sa_service{};
+                sa_service.sin_family = address_type_t::af_type;
+                sa_service.sin_addr = remote_ip;
+                sa_service.sin_port = htons(remote_port);
+
+                if (connect(remote_socket, reinterpret_cast<SOCKADDR*>(&sa_service), sizeof(sa_service)) ==
+                    SOCKET_ERROR)
+                {
+                    if (const auto error = WSAGetLastError(); error != WSAEWOULDBLOCK)
+                    {
+                        NETLIB_WARNING("connect_to_remote_host: IPv4 connect failed: {}", error);
+                        if (undo_pending_entry())
+                        {
+                            shutdown(remote_socket, SD_BOTH);
+                            closesocket(remote_socket);
+                            return false;
+                        }
+
+                        // The connect-event thread (or shutdown cleanup) already claimed the
+                        // tuple and therefore owns both socket handles. Returning true prevents
+                        // the accept thread from closing the local handle a second time.
+                        return true;
+                    }
+                    NETLIB_DEBUG("connect_to_remote_host: IPv4 connection in progress (WSAEWOULDBLOCK)");
+                }
+                else
+                {
+                    NETLIB_DEBUG("connect_to_remote_host: IPv4 connection completed immediately");
+                }
+            }
+            else
+            {
+                sockaddr_in6 sa_service{};
+                sa_service.sin6_family = address_type_t::af_type;
+                sa_service.sin6_addr = remote_ip;
+                sa_service.sin6_port = htons(remote_port);
+
+                if (connect(remote_socket, reinterpret_cast<SOCKADDR*>(&sa_service), sizeof(sa_service)) ==
+                    SOCKET_ERROR)
+                {
+                    if (const auto error = WSAGetLastError(); error != WSAEWOULDBLOCK)
+                    {
+                        NETLIB_WARNING("connect_to_remote_host: IPv6 connect failed: {}", error);
+                        if (undo_pending_entry())
+                        {
+                            shutdown(remote_socket, SD_BOTH);
+                            closesocket(remote_socket);
+                            return false;
+                        }
+
+                        // The connect-event thread (or shutdown cleanup) already claimed the
+                        // tuple and therefore owns both socket handles. Returning true prevents
+                        // the accept thread from closing the local handle a second time.
+                        return true;
+                    }
+                    else
+                    {
+                        NETLIB_DEBUG("connect_to_remote_host: IPv6 connection in progress (WSAEWOULDBLOCK)");
+                    }
+                }
+                else
+                {
+                    NETLIB_DEBUG("connect_to_remote_host: IPv6 connection completed immediately");
+                }
+            }
+
+            NETLIB_DEBUG("connect_to_remote_host: Successfully initiated connection to {}:{}", remote_ip, remote_port);
+            return true;
+        }
+
+        /**
+         * @brief Main thread routine for accepting and dispatching incoming client connections.
+         *
+         * This method runs in a dedicated thread and continuously accepts new TCP client connections
+         * on the server's listening socket as long as the server is running. For each accepted connection:
+         * - If the server is shutting down or the accept fails, the loop exits.
+         * - Attempts to establish a connection to the corresponding remote host using connect_to_remote_host().
+         * - If the remote connection setup fails, the accepted client socket is closed immediately.
+         *
+         * The thread terminates when the server is stopped or a fatal error occurs on accept.
+         */
+        void start_proxy_thread()
+        {
+            while (end_server_ == false)
+            {
+                //
+                // loop accepting connections from clients until proxy shuts down
+                //
+                const auto accepted = WSAAccept(server_socket_, nullptr, nullptr, nullptr, 0);
+
+                if (accepted == static_cast<SOCKET>(INVALID_SOCKET) || end_server_)
+                {
+                    break;
+                }
+
+                if (const auto connected = connect_to_remote_host(accepted); !connected)
+                {
+                    closesocket(accepted);
+                }
+            }
+        }
+
+        [[nodiscard]] bool enqueue_connection_setup(connection_setup_task&& task) noexcept
+        {
+            try
+            {
+                {
+                    std::unique_lock lock(connection_setup_lock_);
+                    if (end_server_.load(std::memory_order_acquire))
+                        return false;
+
+                    if (connection_setup_queue_.size() >= connection_setup_queue_capacity)
+                    {
+                        NETLIB_WARNING("Connection setup queue full, rejecting connected client");
+                        return false;
+                    }
+
+                    connection_setup_queue_.emplace_back(std::move(task));
+                }
+
+                connection_setup_cv_.notify_one();
+                return true;
+            }
+            catch (const std::exception& e)
+            {
+                NETLIB_ERROR("Failed to enqueue connected client for proxy setup: {}", e.what());
+            }
+            catch (...)
+            {
+                NETLIB_ERROR("Failed to enqueue connected client for proxy setup: unknown exception");
+            }
+
+            return false;
+        }
+
+        void initialize_proxy_socket(connection_setup_task task) noexcept
+        {
+            if (end_server_.load(std::memory_order_acquire))
+                return;
+
+            std::shared_ptr<T> socket;
+            const auto clean_failed_socket = [this, &socket]
+            {
+                if (!socket)
+                    return;
+
+                socket->close_client(false, true);
+                socket->close_client(false, false);
+                if (socket->outstanding_io() == 0)
+                {
+                    socket->release_self_references();
+                    socket.reset();
+                    return;
+                }
+
+                // If setup threw after posting overlapped I/O, retain the session so normal
+                // cleanup or stop() can wait for its cancellation completions.
+                std::scoped_lock lock(lock_);
+                proxy_sockets_.push_back(std::move(socket));
+            };
+
+            try
+            {
+                socket = std::make_shared<T>(
+                    task.local_socket,
+                    task.remote_socket,
+                    std::move(task.negotiate_context),
+                    logger::log_level_,
+                    logger::log_stream_);
+
+                // The proxy socket now owns both handles. The task must not close them when it
+                // leaves this function.
+                task.release_sockets();
+
+                socket->initialize_io_contexts();
+                if (!socket->associate_to_completion_port(completion_key_, completion_port_))
+                    throw std::runtime_error("associate_to_completion_port failed");
+
+                // Avoid entering a blocking handshake when shutdown won the race after this task
+                // left the queue. No I/O has been posted yet, so it can be released immediately.
+                if (end_server_.load(std::memory_order_acquire))
+                {
+                    clean_failed_socket();
+                    return;
+                }
+
+                // SOCKS5Tls performs its bounded blocking TLS and SOCKS exchange here. This is
+                // intentionally a setup-worker operation, never connect-event-thread work.
+                socket->start();
+
+                {
+                    std::scoped_lock lock(lock_);
+                    proxy_sockets_.push_back(std::move(socket));
+                }
+            }
+            catch (const std::exception& e)
+            {
+                NETLIB_ERROR("Connection setup worker failed to initialize proxy socket: {}", e.what());
+                try
+                {
+                    clean_failed_socket();
+                }
+                catch (...)
+                {
+                    NETLIB_ERROR("Connection setup worker could not retain a partially initialized socket");
+                }
+            }
+            catch (...)
+            {
+                NETLIB_ERROR("Connection setup worker failed to initialize proxy socket: unknown exception");
+                try
+                {
+                    clean_failed_socket();
+                }
+                catch (...)
+                {
+                    NETLIB_ERROR("Connection setup worker could not retain a partially initialized socket");
+                }
+            }
+        }
+
+        void connection_setup_worker()
+        {
+            while (true)
+            {
+                connection_setup_task task;
+                {
+                    std::unique_lock lock(connection_setup_lock_);
+                    connection_setup_cv_.wait(lock, [this]
+                    {
+                        return end_server_.load(std::memory_order_acquire) ||
+                            !connection_setup_queue_.empty();
+                    });
+
+                    if (end_server_.load(std::memory_order_acquire))
+                        return;
+
+                    task = std::move(connection_setup_queue_.front());
+                    connection_setup_queue_.pop_front();
+                }
+
+                initialize_proxy_socket(std::move(task));
+            }
+        }
+
+        void close_pending_connections()
+        {
+            std::unique_lock lock(lock_);
+            for (auto& pending : sock_array_events_)
+            {
+                if (std::get<0>(pending) != WSA_INVALID_EVENT)
+                {
+                    WSACloseEvent(std::get<0>(pending));
+                    std::get<0>(pending) = WSA_INVALID_EVENT;
+                }
+
+                if (std::get<1>(pending) != INVALID_SOCKET)
+                {
+                    shutdown(std::get<1>(pending), SD_BOTH);
+                    closesocket(std::get<1>(pending));
+                    std::get<1>(pending) = INVALID_SOCKET;
+                }
+
+                if (std::get<2>(pending) != INVALID_SOCKET)
+                {
+                    shutdown(std::get<2>(pending), SD_BOTH);
+                    closesocket(std::get<2>(pending));
+                    std::get<2>(pending) = INVALID_SOCKET;
+                }
+            }
+            sock_array_events_.clear();
+        }
+
+        /**
+         * @brief Thread routine for handling asynchronous connections to remote hosts.
+         *
+         * This method runs in a dedicated thread and manages the completion of non-blocking connect operations
+         * for remote sockets. It operates as follows:
+         * - Continuously builds a list of WSAEVENT handles corresponding to pending remote connection attempts.
+         * - Waits for any of these events to be signaled, indicating a completed connection attempt.
+         * - If a connection event (other than the first) is signaled, finalizes the session:
+         *   - Closes the event handle.
+         *   - Constructs a new proxy socket instance for the completed connection, associates it with the I/O completion port,
+         *     and starts the proxy session.
+         *   - Removes the processed entry from the tracking array.
+         * - If the first event is signaled, resets it and continues.
+         * - On server shutdown, cleans up all remaining events and sockets in the tracking array.
+         *
+         * Thread safety is ensured via shared and exclusive locks as needed.
+         * The thread exits when the server is stopped.
+         */
+        void connect_to_remote_host_thread()
+        {
+            std::vector<WSAEVENT> wait_events;
+            wait_events.reserve(connections_array_size);
+
+            while (end_server_ == false)
+            {
+                // initialize wait events array
+                wait_events.clear();
+
+                {
+                    std::shared_lock lock(lock_);
+
+                    std::transform(sock_array_events_.cbegin(), sock_array_events_.cend(),
+                        std::back_inserter(wait_events), [](auto&& e)
+                        {
+                            return std::get<0>(e);
+                        });
+                }
+
+                const auto event_index = wait_for_multiple_objects(static_cast<DWORD>(wait_events.size()),
+                    wait_events.data(), INFINITE);
+
+                if (end_server_ == true)
+                    break;
+
+                // WaitForMultipleObjects can return WAIT_FAILED (0xFFFFFFFF) -- e.g. when a handle
+                // in the array has become invalid. An INFINITE wait never returns WAIT_TIMEOUT, but
+                // guard against any out-of-range value: using it as a vector index below would be wild out-of-bounds access.
+                // Log, back off briefly to avoid a hot spin if the
+                // condition persists, and rebuild the wait set on the next iteration.
+                if (event_index == WAIT_FAILED || event_index >= wait_events.size())
+                {
+                    NETLIB_ERROR("connect_to_remote_host_thread: wait returned invalid index {} (last error {})",
+                        static_cast<unsigned long>(event_index), GetLastError());
+                    using namespace std::chrono_literals;
+                    std::this_thread::sleep_for(100ms);
+                    continue;
+                }
+
+                if (event_index != 0)
+                {
+                    auto local_socket = static_cast<SOCKET>(INVALID_SOCKET);
+                    auto remote_socket = static_cast<SOCKET>(INVALID_SOCKET);
+                    std::unique_ptr<negotiate_context_t> negotiate_ctx;
+                    int connect_error = 0;
+                    {
+                        std::scoped_lock lock(lock_);
+
+                        // The wait set is a snapshot. A synchronous connect failure can erase an
+                        // entry while this thread is waiting, so locate the live tuple by event
+                        // handle instead of indexing the potentially shifted vector.
+                        const auto signaled_event = wait_events[event_index];
+                        const auto pending = std::find_if(
+                            sock_array_events_.begin() + 1,
+                            sock_array_events_.end(),
+                            [signaled_event](const auto& entry)
+                            {
+                                return std::get<0>(entry) == signaled_event;
+                            });
+                        if (pending == sock_array_events_.end())
+                        {
+                            continue;
+                        }
+
+                        local_socket = std::get<1>(*pending);
+                        remote_socket = std::get<2>(*pending);
+                        negotiate_ctx = std::move(std::get<3>(*pending));
+
+                        // An FD_CONNECT event reports completion, not necessarily success.
+                        WSANETWORKEVENTS network_events{};
+                        if (WSAEnumNetworkEvents(remote_socket, signaled_event, &network_events) == SOCKET_ERROR)
+                        {
+                            connect_error = WSAGetLastError();
+                        }
+                        else if ((network_events.lNetworkEvents & FD_CONNECT) == 0)
+                        {
+                            connect_error = WSAEINVAL;
+                        }
+                        else
+                        {
+                            connect_error = network_events.iErrorCode[FD_CONNECT_BIT];
+                        }
+
+                        WSACloseEvent(signaled_event);
+                        sock_array_events_.erase(pending);
+                    }
+
+                    if (connect_error != 0)
+                    {
+                        NETLIB_WARNING("connect_to_remote_host_thread: remote connect failed: {}", connect_error);
+                        shutdown(local_socket, SD_BOTH);
+                        closesocket(local_socket);
+                        shutdown(remote_socket, SD_BOTH);
+                        closesocket(remote_socket);
+                        continue;
+                    }
+
+                    connection_setup_task setup_task{
+                        local_socket,
+                        remote_socket,
+                        std::move(negotiate_ctx)
+                    };
+                    if (!enqueue_connection_setup(std::move(setup_task)))
+                    {
+                        NETLIB_WARNING("connect_to_remote_host_thread: unable to queue connected client for setup");
+                    }
+                }
+                else
+                {
+                    WSAResetEvent(wait_events[event_index]);
+                }
+            }
+
+            close_pending_connections();
+        }
+
+        /**
+         * @brief Thread routine for cleaning up closed or idle proxy sessions.
+         *
+         * This method runs in a dedicated thread and periodically scans the list of active proxy socket
+         * instances. It removes any sockets that are ready for removal (e.g., closed or idle sessions)
+         * from the internal proxy_sockets_ vector. The cleanup operation is protected by a lock to ensure
+         * thread safety. The thread sleeps for 1 second between cleanup cycles and exits when the server
+         * is stopped.
+         */
+        void clear_thread()
+        {
+            while (end_server_ == false)
+            {
+                {
+                    std::scoped_lock lock(lock_);
+
+                    proxy_sockets_.erase(std::remove_if(proxy_sockets_.begin(), proxy_sockets_.end(), [](auto&& a)
+                        {
+                            return a->is_ready_for_removal();
+                        }), proxy_sockets_.end());
+                }
+
+                using namespace std::chrono_literals;
+                std::this_thread::sleep_for(1000ms);
+            }
+        }
+
+        /**
+         * @brief Waits for one or more objects (such as threads or events) to become signaled.
+         *
+         * This static utility function provides a scalable way to wait for multiple synchronization objects,
+         * such as thread or event handles, to become signaled. If the number of handles exceeds the platform's
+         * MAXIMUM_WAIT_OBJECTS, the function recursively splits the array and waits on subsets, using a randomized
+         * order to avoid starvation. For a manageable number of handles, it delegates to the native
+         * ::WaitForMultipleObjects API.
+         *
+         * @param count   The number of handles in the array.
+         * @param handles Pointer to an array of HANDLEs to wait on.
+         * @param ms      The maximum time to wait, in milliseconds. Use INFINITE for no timeout.
+         * @return WAIT_OBJECT_0 + index of the signaled handle if successful, WAIT_TIMEOUT if the wait timed out.
+         */
+        static DWORD wait_for_multiple_objects(const DWORD count, const HANDLE* handles, const DWORD ms)
+        {
+            // Thread local seed for rand_r
+            thread_local auto seed = static_cast<uint32_t>(time(nullptr));
+
+            // Initial result set to timeout
+            DWORD result = WAIT_TIMEOUT;
+
+            // If the number of objects is greater than the maximum allowed...
+            if (count >= MAXIMUM_WAIT_OBJECTS)
+            {
+                // Loop until a handle is signaled or until the timeout is reached if timeout is infinite
+                do
+                {
+                    // Divide the number of handles in half
+                    const DWORD split = count / 2;
+
+                    // Divide the wait time in half, if timeout is infinite, use a default wait time of 2000ms
+                    const DWORD wait = (ms == INFINITE ? 2000 : ms) / 2;
+                    const int random = rand_s(&seed);
+
+                    // Recurse on both halves in a random order until a handle is signaled or all handles are checked
+                    for (short branch = 0; branch < 2 && result == WAIT_TIMEOUT; branch++)
+                    {
+                        if (random % 2 == branch)
+                        {
+                            // Wait for the lower half of handles
+                            result = wait_for_multiple_objects(split, handles, wait);
+                        }
+                        else
+                        {
+                            // Wait for the upper half of handles, adjust result if a handle is signaled
+                            result = wait_for_multiple_objects(count - split, handles + split, wait);
+                            if (result >= WAIT_OBJECT_0 && result < WAIT_OBJECT_0 + split) result += split;
+                        }
+                    }
+                } while (ms == INFINITE && result == WAIT_TIMEOUT);
+            }
+            else
+            {
+                // If the number of handles is within limit, use the native win32 function
+                result = ::WaitForMultipleObjects(count, handles, FALSE, ms);
+            }
+
+            // Return the result
+            return result;
+        }
+    };
+}

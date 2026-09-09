@@ -1,0 +1,2127 @@
+#pragma once
+
+#include <condition_variable>
+#include <deque>
+
+// SIO_UDP_CONNRESET normally comes from <mstcpip.h>, but this header-only file relies on the
+// project's master include order and the macro is not reliably visible here across SDKs. Provide
+// the standard fallback definition; _WSAIOW/IOC_VENDOR are from <winsock2.h>, which is always
+// included ahead of this file.
+#ifndef SIO_UDP_CONNRESET
+#define SIO_UDP_CONNRESET _WSAIOW(IOC_VENDOR, 12)
+#endif
+
+namespace proxy
+{
+    /**
+     * @brief SOCKS5 UDP proxy server implementation.
+     *
+     * This class implements a local UDP proxy server that relays UDP packets through a SOCKS5 proxy.
+     * It manages the lifecycle of proxy sockets, handles client connections, and coordinates
+     * asynchronous I/O operations using Windows I/O completion ports.
+     *
+     * @tparam T Proxy socket implementation type.
+     */
+    template <typename T>
+    class socks5_local_udp_proxy_server : public netlib::log::logger<socks5_local_udp_proxy_server<T>>  // NOLINT(clang-diagnostic-padded)
+    {
+    public:
+        /**
+         * @brief Logging level type alias.
+         *
+         * Alias for the logging level enumeration used by the proxy server.
+         */
+        using log_level = netlib::log::log_level;
+
+        /**
+         * @brief Logger type alias.
+         *
+         * Alias for the logger base class used for logging within the proxy server.
+         */
+        using logger = netlib::log::logger<socks5_local_udp_proxy_server>;
+
+        /**
+         * @brief Negotiation context type alias.
+         *
+         * Alias for the negotiation context type defined by the proxy socket implementation (T).
+         * Used to store authentication and session information for SOCKS5 negotiation.
+         */
+        using negotiate_context_t = T::negotiate_context_t;
+
+        /**
+         * @brief Address type alias.
+         *
+         * Alias for the address type defined by the proxy socket implementation (T).
+         * Represents an IPv4 or IPv6 address, depending on the template parameter.
+         */
+        using address_type_t = T::address_type_t;
+
+        /**
+         * @brief Per-I/O context type alias.
+         *
+         * Alias for the per-I/O context type defined by the proxy socket implementation (T).
+         * Used for managing asynchronous I/O operations.
+         */
+        using per_io_context_t = T::per_io_context_t;
+
+        /**
+         * @brief Query remote peer function signature.
+         *
+         * Function type that takes a local address and port, and returns a tuple containing:
+         * - The remote address to connect to,
+         * - The remote port,
+         * - A unique pointer to a negotiation context (for authentication/session).
+         */
+        using query_remote_peer_t = std::tuple<address_type_t, uint16_t, std::unique_ptr<negotiate_context_t>>(
+            address_type_t, uint16_t);
+
+        /**
+         * @brief Callback invoked after a UDP relay has been fully established.
+         *
+         * The router uses this as a transaction commit: its source-port authorization
+         * remains available while SOCKS5 connect/ASSOCIATE is in progress and is consumed
+         * only after the relay socket has been published successfully.
+         */
+        using commit_remote_peer_t = void(address_type_t, uint16_t);
+
+    private:
+        /**
+         * @brief Maximum number of simultaneous proxy connections.
+         *
+         * This constant defines the maximum number of concurrent connections
+         * the proxy server will track in its internal connection array.
+         */
+        constexpr static size_t connections_array_size = 64;
+
+        /**
+         * @brief Requested UDP socket buffer size for QUIC-sized bursts.
+         *
+         * Browser QUIC can emit many ~1200 byte datagrams immediately. The first
+         * datagram for a local UDP source port may need to establish a SOCKS5 TCP
+         * control connection and complete UDP ASSOCIATE before it can be forwarded;
+         * while that happens, the local UDP proxy socket relies on the kernel
+         * receive buffer to hold the rest of the burst.
+         */
+        constexpr static int udp_socket_buffer_size = 4 * 1024 * 1024;
+
+        /** Number of blocking SOCKS5 UDP ASSOCIATE operations allowed in parallel. */
+        constexpr static size_t association_worker_count = 4;
+
+        /** Maximum payload bytes retained while UDP associations are being established. */
+        constexpr static size_t max_pending_datagram_bytes = udp_socket_buffer_size;
+
+        struct pending_datagram  // NOLINT(clang-diagnostic-padded)
+        {
+            SOCKADDR_STORAGE sender{};
+            std::unique_ptr<net_packet_t> packet;
+            uint32_t size{};
+        };
+
+        /**
+         * @brief Mutex for synchronizing access to internal data structures.
+         *
+         * Used to protect shared resources such as the proxy_sockets_ map
+         * from concurrent access by multiple threads.
+         */
+        std::mutex lock_;
+
+        /**
+         * @brief Thread object for the main proxy server loop.
+         *
+         * Handles the main server operations, such as accepting and processing client requests.
+         */
+        std::thread proxy_server_;
+
+        /**
+         * @brief Thread object for client cleanup operations.
+         *
+         * Periodically checks and removes inactive or closed client connections.
+         */
+        std::thread check_clients_thread_;
+
+        /** Workers that keep blocking SOCKS5 negotiation off the IOCP threads. */
+        std::vector<std::thread> association_workers_;
+
+        /** One FIFO per source port; a port appears in association_queue_ at most once. */
+        std::map<uint16_t, std::deque<pending_datagram>> pending_datagrams_;
+
+        /** Source ports waiting for one association worker. */
+        std::deque<uint16_t> association_queue_;
+
+        std::condition_variable association_cv_;
+
+        /** Wakes session maintenance immediately when the shared receive needs recovery. */
+        std::condition_variable maintenance_cv_;
+
+        size_t pending_datagram_bytes_{ 0 };
+
+        /**
+         * @brief Map of active proxy sockets indexed by local UDP port.
+         *
+         * Uses shared_ptr to enable safe concurrent access from IOCP threads.
+         * Each entry represents a client session managed by the proxy server.
+         * The last reference may be held by a pending I/O operation.
+         */
+        std::map<uint16_t, std::shared_ptr<T>> proxy_sockets_;
+
+        /**
+         * @brief UDP server socket handle.
+         *
+         * The main socket used to receive and send UDP packets for the proxy server.
+         */
+        SOCKET server_socket_{ INVALID_SOCKET };
+
+        /**
+         * @brief Memory pool for efficient allocation and reuse of packet buffers.
+         */
+        std::shared_ptr<packet_pool> packet_pool_{};
+
+        /**
+         * @brief Buffer for receiving UDP packets from clients.
+         */
+        std::array<char, T::send_receive_buffer_size> server_receive_buffer_{};
+
+        /**
+         * @brief WSABUF structure for overlapped I/O operations on the server socket.
+         */
+        WSABUF server_recv_buf_{ static_cast<ULONG>(server_receive_buffer_.size()), server_receive_buffer_.data() };
+
+        /**
+         * @brief Per-I/O context for the server socket's read operations.
+         */
+        per_io_context_t server_io_context_{ proxy_io_operation::relay_io_read, nullptr, true };
+
+        /**
+         * @brief Storage populated by the currently outstanding server receive.
+         */
+        SOCKADDR_STORAGE recv_from_sa_{};
+
+        /**
+         * @brief Reference to the I/O completion port used for asynchronous operations.
+         */
+        netlib::winsys::io_completion_port& completion_port_;
+
+        /**
+         * @brief Function to query remote peer information for a given local address and port.
+         */
+        std::function<query_remote_peer_t> query_remote_peer_;
+
+        /**
+         * @brief Optional callback that commits a successfully established source-port mapping.
+         */
+        std::function<commit_remote_peer_t> commit_remote_peer_;
+
+        /**
+         * @brief Completion key associated with the server socket in the I/O completion port.
+         */
+        ULONG_PTR completion_key_{ 0 };
+
+        /**
+         * @brief Size of the sender address structure.
+         */
+        INT recv_from_sa_size_{ sizeof(SOCKADDR_STORAGE) };
+
+        /**
+         * @brief Counts the number of IOCP operations currently executing in the lambda.
+         *
+         * Incremented when entering the lambda, decremented when exiting.
+         * Used during shutdown to ensure no operations are in-flight before destroying the object.
+         */
+        std::atomic<int32_t> active_iocp_operations_{ 0 };
+
+        /**
+         * @brief Local UDP port number the proxy server is bound to.
+         */
+        uint16_t proxy_port_;
+
+        /** Set when a completed server receive could not be re-armed synchronously. */
+        std::atomic_bool server_receive_rearm_needed_{ false };
+
+        /**
+         * @brief Indicates whether the server is terminating.
+         *
+         * Set to true when the server is stopping or has stopped.
+         */
+        std::atomic_bool end_server_{ true }; // set to true on proxy termination
+
+        void tune_udp_socket_buffers(const SOCKET socket, const char* const socket_name) const noexcept
+        {
+            const auto set_buffer = [this, socket, socket_name](const int option, const char* const option_name)
+            {
+                int requested_size = udp_socket_buffer_size;
+                if (setsockopt(socket, SOL_SOCKET, option,
+                    reinterpret_cast<const char*>(&requested_size), sizeof(requested_size)) == SOCKET_ERROR)
+                {
+                    NETLIB_WARNING("{}: failed to set {} to {} bytes: {}",
+                        socket_name, option_name, requested_size, WSAGetLastError());
+                    return;
+                }
+
+                int actual_size = 0;
+                int actual_size_len = static_cast<int>(sizeof(actual_size));
+                if (getsockopt(socket, SOL_SOCKET, option,
+                    reinterpret_cast<char*>(&actual_size), &actual_size_len) == 0)
+                {
+                    NETLIB_DEBUG("{}: {} is {} bytes", socket_name, option_name, actual_size);
+                }
+            };
+
+            set_buffer(SO_RCVBUF, "SO_RCVBUF");
+            set_buffer(SO_SNDBUF, "SO_SNDBUF");
+        }
+
+        [[nodiscard]] std::optional<std::pair<address_type_t, uint16_t>> local_endpoint_from(
+            const SOCKADDR_STORAGE& sender) const
+        {
+            if constexpr (address_type_t::af_type == AF_INET)
+            {
+                if (sender.ss_family != AF_INET)
+                    return std::nullopt;
+
+                const auto* address = reinterpret_cast<const sockaddr_in*>(&sender);
+                return std::pair{ address_type_t{ address->sin_addr }, ntohs(address->sin_port) };
+            }
+            else if constexpr (address_type_t::af_type == AF_INET6)
+            {
+                if (sender.ss_family != AF_INET6)
+                    return std::nullopt;
+
+                const auto* address = reinterpret_cast<const sockaddr_in6*>(&sender);
+                return std::pair{ address_type_t{ address->sin6_addr }, ntohs(address->sin6_port) };
+            }
+            else
+            {
+                static_assert(false_v<T>, "Unsupported address family used as a template parameter!");
+            }
+            return {};
+        }
+
+        bool post_server_receive()
+        {
+            DWORD flags = 0;
+            recv_from_sa_ = {};
+            recv_from_sa_size_ = sizeof(recv_from_sa_);
+            static_cast<WSAOVERLAPPED&>(server_io_context_) = WSAOVERLAPPED{};
+
+            return (::WSARecvFrom(
+                server_socket_,
+                &server_recv_buf_,
+                1,
+                nullptr,
+                &flags,
+                reinterpret_cast<sockaddr*>(&recv_from_sa_),
+                &recv_from_sa_size_,
+                &server_io_context_,
+                nullptr) != SOCKET_ERROR) || (ERROR_IO_PENDING == WSAGetLastError());
+        }
+
+        void release_pending_datagram(pending_datagram& datagram)
+        {
+            if (datagram.packet)
+                packet_pool_->free(std::move(datagram.packet));
+        }
+
+        void forward_pending_datagram(const std::shared_ptr<T>& proxy_socket, pending_datagram& datagram)
+        {
+            if (const auto local_endpoint = local_endpoint_from(datagram.sender))
+                commit_remote_peer(local_endpoint->first, local_endpoint->second);
+
+            per_io_context_t context{ proxy_io_operation::relay_io_read, proxy_socket, true };
+            context.wsa_buf = std::move(datagram.packet);
+            proxy_socket->process_receive_buffer_complete(datagram.size, &context);
+        }
+
+        void process_local_datagram(pending_datagram datagram)
+        {
+            const auto local_endpoint = local_endpoint_from(datagram.sender);
+            if (!local_endpoint || local_endpoint->second == 0)
+            {
+                release_pending_datagram(datagram);
+                return;
+            }
+
+            const auto local_port = local_endpoint->second;
+            std::unique_lock lock(lock_);
+
+            if (end_server_.load(std::memory_order_acquire))
+            {
+                release_pending_datagram(datagram);
+                return;
+            }
+
+            const auto enqueue = [this, local_port](pending_datagram& queued_datagram,  // NOLINT(clang-diagnostic-padded)
+                                                    const bool schedule_association) -> bool
+            {
+                if (queued_datagram.size > max_pending_datagram_bytes ||
+                    pending_datagram_bytes_ > max_pending_datagram_bytes - queued_datagram.size)
+                {
+                    NETLIB_WARNING("Dropping UDP datagram for source port {}: pending association queue is full",
+                        local_port);
+                    release_pending_datagram(queued_datagram);
+                    return false;
+                }
+
+                auto [pending, inserted] = pending_datagrams_.try_emplace(local_port);
+                pending->second.emplace_back(std::move(queued_datagram));
+                pending_datagram_bytes_ += pending->second.back().size;
+
+                if (inserted && schedule_association)
+                {
+                    association_queue_.push_back(local_port);
+                    association_cv_.notify_one();
+                }
+
+                return true;
+            };
+
+            // An empty entry is retained while a newly established relay drains its queued first
+            // flight. Keep appending there so packets cannot overtake datagrams received earlier.
+            if (pending_datagrams_.contains(local_port))
+            {
+                (void)enqueue(datagram, false);
+                return;
+            }
+
+            if (const auto existing = proxy_sockets_.find(local_port); existing != proxy_sockets_.end())
+            {
+                forward_pending_datagram(existing->second, datagram);
+                return;
+            }
+
+            (void)enqueue(datagram, true);
+        }
+
+        void association_worker()
+        {
+            while (true)
+            {
+                std::unique_lock lock(lock_);
+                association_cv_.wait(lock, [this]
+                {
+                    return end_server_.load(std::memory_order_acquire) || !association_queue_.empty();
+                });
+
+                if (end_server_.load(std::memory_order_acquire))
+                    return;
+
+                const auto local_port = association_queue_.front();
+                association_queue_.pop_front();
+
+                auto pending = pending_datagrams_.find(local_port);
+                if (pending == pending_datagrams_.end() || pending->second.empty())
+                    continue;
+
+                const auto sender = pending->second.front().sender;
+                std::shared_ptr<T> proxy_socket;
+
+                try
+                {
+                    if (!connect_to_remote_host(sender, lock, proxy_socket))
+                        proxy_socket.reset();
+                }
+                catch (const std::exception& e)
+                {
+                    if (!lock.owns_lock())
+                        lock.lock();
+                    NETLIB_ERROR("UDP association worker failed for source port {}: {}", local_port, e.what());
+                }
+                catch (...)
+                {
+                    if (!lock.owns_lock())
+                        lock.lock();
+                    NETLIB_ERROR("UDP association worker failed for source port {}: unknown exception", local_port);
+                }
+
+                pending = pending_datagrams_.find(local_port);
+                if (pending == pending_datagrams_.end())
+                    continue;
+
+                if (!proxy_socket || end_server_.load(std::memory_order_acquire))
+                {
+                    auto datagrams = std::move(pending->second);
+                    pending_datagrams_.erase(pending);
+                    for (auto& datagram : datagrams)
+                    {
+                        pending_datagram_bytes_ -= datagram.size;
+                        release_pending_datagram(datagram);
+                    }
+                    continue;
+                }
+
+                // Keep the map entry as an ordering marker while the first flight drains. New
+                // packets append to it instead of bypassing older queued datagrams via the now-live
+                // proxy_sockets_ entry.
+                while (!end_server_.load(std::memory_order_acquire))
+                {
+                    pending = pending_datagrams_.find(local_port);
+                    if (pending == pending_datagrams_.end())
+                        break;
+
+                    if (pending->second.empty())
+                    {
+                        pending_datagrams_.erase(pending);
+                        break;
+                    }
+
+                    auto datagrams = std::move(pending->second);
+                    pending->second.clear();
+
+                    for (auto& datagram : datagrams)
+                    {
+                        pending_datagram_bytes_ -= datagram.size;
+                        forward_pending_datagram(proxy_socket, datagram);
+                        lock.unlock();
+                        std::this_thread::yield();
+                        lock.lock();
+
+                        if (end_server_.load(std::memory_order_acquire))
+                            break;
+                    }
+
+                    if (end_server_.load(std::memory_order_acquire))
+                    {
+                        for (auto& datagram : datagrams)
+                            release_pending_datagram(datagram);
+                    }
+                }
+            }
+        }
+
+        void release_all_pending_datagrams()
+        {
+            std::scoped_lock lock(lock_);
+            for (auto& [port, datagrams] : pending_datagrams_)
+            {
+                for (auto& datagram : datagrams)
+                    release_pending_datagram(datagram);
+            }
+
+            pending_datagrams_.clear();
+            association_queue_.clear();
+            pending_datagram_bytes_ = 0;
+        }
+
+    public:
+        /**
+         * @brief Constructs a SOCKS5 local UDP proxy server.
+         *
+         * Initializes the proxy server with the specified UDP port, I/O completion port,
+         * remote peer query function, logging level, and optional log stream.
+         *
+         * @param proxy_port The local UDP port to bind the proxy server to.
+         * @param completion_port Reference to the I/O completion port for asynchronous operations.
+         * @param query_remote_peer_fn Function to resolve the remote peer for a given local address/port.
+         * @param log_level The logging level for the server (default: error).
+         * @param log_stream Optional output stream for logging (default: std::nullopt).
+         *
+         * @throws std::runtime_error if the server socket cannot be created or bound.
+         */
+        socks5_local_udp_proxy_server(const uint16_t proxy_port, netlib::winsys::io_completion_port& completion_port,
+            const std::function<query_remote_peer_t>& query_remote_peer_fn,
+            const log_level log_level = log_level::error,
+            std::shared_ptr<std::ostream> log_stream = nullptr,
+            const std::function<commit_remote_peer_t>& commit_remote_peer_fn = {})
+            : logger(log_level, std::move(log_stream)),
+            completion_port_(completion_port),
+            query_remote_peer_(query_remote_peer_fn),
+            commit_remote_peer_(commit_remote_peer_fn),
+            proxy_port_(proxy_port)
+        {
+            if (!create_server_socket())
+            {
+                throw std::runtime_error("socks5_local_udp_proxy_server: failed to create server socket.");
+            }
+
+            packet_pool_ = std::make_shared<packet_pool>();
+        }
+
+        /**
+         * @brief Destructor. Cleans up resources and stops the server if running.
+         *
+         * Stops a running server before releasing its socket and worker-owned state.
+         */
+        ~socks5_local_udp_proxy_server()
+        {
+            if (end_server_ == false)
+            {
+                stop();
+            }
+            else if (server_socket_ != static_cast<SOCKET>(INVALID_SOCKET))
+            {
+                closesocket(server_socket_);
+                server_socket_ = INVALID_SOCKET;
+            }
+        }
+
+        // Deleted copy constructor to prevent copying.
+        socks5_local_udp_proxy_server(const socks5_local_udp_proxy_server& other) = delete;
+
+        // Deleted move constructor to prevent moving.
+        socks5_local_udp_proxy_server(socks5_local_udp_proxy_server&& other) noexcept = delete;
+
+        // Deleted copy assignment operator to prevent copying.
+        socks5_local_udp_proxy_server& operator=(const socks5_local_udp_proxy_server& other) = delete;
+
+        // Deleted move assignment operator to prevent moving.
+        socks5_local_udp_proxy_server& operator=(socks5_local_udp_proxy_server&& other) noexcept = delete;
+
+        /**
+         * @brief Gets the local UDP port the proxy server is bound to.
+         *
+         * @return The UDP port number.
+         */
+        [[nodiscard]] uint16_t proxy_port() const
+        {
+            return proxy_port_;
+        }
+
+        /**
+         * @brief Starts the SOCKS5 local UDP proxy server.
+         *
+         * Associates the server socket with the I/O completion port and begins listening for UDP packets.
+         * If the server is already running, this function is a no-op and returns true.
+         * On failure, the server socket is closed and the server is marked as stopped.
+         *
+         * @return True if the server started successfully or was already running, false otherwise.
+         */
+        bool start()
+        {
+            if (end_server_ == false)
+            {
+                // already running
+                return true;
+            }
+
+            end_server_ = false;
+            server_receive_rearm_needed_.store(false, std::memory_order_release);
+
+            if (server_socket_ == static_cast<SOCKET>(INVALID_SOCKET))
+            {
+                end_server_ = true;
+                return false;
+            }
+
+            if (server_socket_ != static_cast<SOCKET>(INVALID_SOCKET))
+            {
+                if (auto [associate_status, io_key] = completion_port_.associate_socket(
+                    server_socket_,
+                    [this](const DWORD num_bytes, OVERLAPPED* povlp, const BOOL status)
+                    {
+                        // Count this completion for the entire duration of the callback so
+                        // stop() waits for it. EVERY completion the IOCP delivers on this
+                        // shared key -- the server read AND every per-session proxy
+                        // relay/negotiate/inject completion -- is balanced exactly once:
+                        // +1 here, -1 in the guard below. (Previously only the server-read
+                        // re-post incremented, so proxy completions drove the counter
+                        // negative and stop() could stop waiting while a callback still ran.)
+                        active_iocp_operations_.fetch_add(1, std::memory_order_acquire);
+
+                        // RAII guard to ensure we decrement on all exit paths (including exceptions)
+                        struct operation_guard {
+                            std::atomic<int32_t>& counter;
+                            
+                            explicit operation_guard(std::atomic<int32_t>& c) : counter(c) {}
+                            
+                            ~operation_guard() {
+                                counter.fetch_sub(1, std::memory_order_release);
+                            }
+                            
+                            // Delete copy and move to satisfy Rule of 5
+                            operation_guard(const operation_guard&) = delete;
+                            operation_guard(operation_guard&&) = delete;
+                            operation_guard& operator=(const operation_guard&) = delete;
+                            operation_guard& operator=(operation_guard&&) = delete;
+                        } guard{ active_iocp_operations_ };
+
+                        auto io_context = static_cast<per_io_context_t*>(povlp);
+
+                        // While the server is shutting down we must still fully process each
+                        // delivered completion -- decrement its outstanding-I/O count (via io_dec
+                        // below) and release any heap per-I/O context it owns -- but must start no
+                        // NEW work (no connect, no data-relay dispatch, no recv/send re-arm). Read
+                        // this once and gate the new-work paths on it. The unconditional io_dec
+                        // guard keeps outstanding_io_ balanced without a special early return.
+                        const bool shutting_down = end_server_.load(std::memory_order_acquire);
+
+                        // Copy a completed local datagram before reusing the one server buffer and
+                        // OVERLAPPED. The re-post happens before any SOCKS5 setup, so a blocking
+                        // UDP ASSOCIATE can never stop the socket from draining a QUIC burst.
+                        if (io_context == &server_io_context_)
+                        {
+                            pending_datagram datagram{};
+
+                            if (status && num_bytes && !shutting_down)
+                            {
+                                datagram.packet = packet_pool_->allocate(num_bytes);
+                                if (datagram.packet)
+                                {
+                                    datagram.sender = recv_from_sa_;
+                                    datagram.size = num_bytes;
+                                    datagram.packet->len = num_bytes;
+                                    memmove(datagram.packet->buf, server_receive_buffer_.data(), num_bytes);
+                                }
+                            }
+
+                            const auto receive_rearmed = shutting_down || post_server_receive();
+                            if (!receive_rearmed)
+                            {
+                                // io_completion_port callbacks have no control-flow return
+                                // contract: their bool result is intentionally ignored. Hand
+                                // recovery to clear_thread instead of leaving this listener
+                                // permanently alive with no outstanding WSARecvFrom.
+                                server_receive_rearm_needed_.store(true, std::memory_order_release);
+                                maintenance_cv_.notify_one();
+                                NETLIB_WARNING("Failed to re-arm the local UDP receive; retrying from the maintenance thread");
+                            }
+
+                            if (datagram.packet)
+                                process_local_datagram(std::move(datagram));
+
+                            return true;
+                        }
+
+                        std::unique_lock lock(lock_);
+
+                        // Balance the io_posted() done when a per-session overlapped op was
+                        // posted. This completion is a real delivery -- success OR failure: an
+                        // aborted recv/send flushed by close_client()'s CancelIoEx during teardown
+                        // arrives here with status == false. It must therefore decrement the owning
+                        // proxy socket's outstanding-I/O count exactly once on every exit path,
+                        // independent of status and of whether we dispatch below; trapping
+                        // the decrement inside "if (status && result)" would leak the count on every
+                        // torn-down session and the socket would never become removable. Server-read
+                        // completions ride server_io_context_, which no proxy socket ever counted, so
+                        // they are excluded. The strong ref keeps the socket alive until decrement.
+                        std::shared_ptr<T> completing_socket = io_context->proxy_socket_ptr;
+                        struct io_dec_guard {
+                            T* s;
+                            explicit io_dec_guard(T* sock) : s(sock) {}
+                            ~io_dec_guard() { if (s) s->io_completed(); }
+                            io_dec_guard(const io_dec_guard&) = delete;
+                            io_dec_guard(io_dec_guard&&) = delete;
+                            io_dec_guard& operator=(const io_dec_guard&) = delete;
+                            io_dec_guard& operator=(io_dec_guard&&) = delete;
+                        } io_dec{ completing_socket.get() };
+
+                        // The proxy socket may have released its self-reference during teardown; a
+                        // late completion then finds null and is safely ignored.
+                        if (auto proxy_socket = io_context->proxy_socket_ptr)
+                        {
+                            switch (io_context->io_operation)
+                            {
+                            // Reads (and the no-op negotiate handlers) run a handler that posts NEW
+                            // overlapped I/O, so only dispatch them on a successful, non-teardown
+                            // completion. On an aborted read (status == false) or during shutdown
+                            // there is nothing to free -- the recv uses a member io_context -- so we
+                            // just fall through to the io_dec decrement.
+                            case proxy_io_operation::relay_io_read:
+                                if (status && !shutting_down)
+                                    proxy_socket->process_receive_buffer_complete(num_bytes, io_context);
+                                break;
+
+                            case proxy_io_operation::negotiate_io_read:
+                                if (status && !shutting_down)
+                                    proxy_socket->process_receive_negotiate_complete(num_bytes, io_context);
+                                break;
+
+                            case proxy_io_operation::negotiate_io_write:
+                                if (status && !shutting_down)
+                                    proxy_socket->process_send_negotiate_complete(num_bytes, io_context);
+                                break;
+
+                            // Writes and injects own a HEAP io_context (allocated per datagram via
+                            // allocate_io_context / new). Their handler only releases that context
+                            // (and its pooled packet) and posts no new I/O, so it MUST run on EVERY
+                            // completion -- including an aborted one (status == false) flushed by
+                            // close_client()'s CancelIoEx during runtime teardown or shutdown.
+                            // Skipping it leaks the context and its buffer and keeps this socket
+                            // pinned alive via the context's strong proxy_socket_ptr.
+                            case proxy_io_operation::relay_io_write:
+                                proxy_socket->process_send_buffer_complete(num_bytes, io_context);
+                                break;
+
+                            case proxy_io_operation::inject_io_write:
+                                T::process_inject_buffer_complete(packet_pool_, io_context);
+                                break;
+
+                            default: break; // NOLINT(clang-diagnostic-covered-switch-default)
+                            }
+                        }
+
+                        return true;
+                   }); associate_status == true)
+                {
+                    completion_key_ = io_key;
+
+                    try
+                    {
+                        association_workers_.reserve(association_worker_count);
+                        for (size_t i = 0; i < association_worker_count; ++i)
+                        {
+                            association_workers_.emplace_back(
+                                &socks5_local_udp_proxy_server<T>::association_worker, this);
+                        }
+                    }
+                    catch (...)
+                    {
+                        end_server_ = true;
+                        association_cv_.notify_all();
+                        for (auto& worker : association_workers_)
+                        {
+                            if (worker.joinable())
+                                worker.join();
+                        }
+                        association_workers_.clear();
+                        closesocket(server_socket_);
+                        server_socket_ = INVALID_SOCKET;
+                        (void)completion_port_.unregister_handler(completion_key_);
+                        completion_key_ = 0;
+                        return false;
+                    }
+
+                    // Post the initial server read. Its completion is counted when dispatched
+                    // (the fetch_add at the top of the completion lambda), so no bump here.
+                    if (!post_server_receive())
+                    {
+                        end_server_ = true;
+                        association_cv_.notify_all();
+                        for (auto& worker : association_workers_)
+                        {
+                            if (worker.joinable())
+                                worker.join();
+                        }
+                        association_workers_.clear();
+                        closesocket(server_socket_);
+                        server_socket_ = INVALID_SOCKET;
+                        (void)completion_port_.unregister_handler(completion_key_);
+                        completion_key_ = 0;
+                        return false;
+                    }
+                }
+                else
+                {
+                    if (server_socket_ != static_cast<SOCKET>(INVALID_SOCKET))
+                    {
+                        closesocket(server_socket_);
+                    }
+
+                    end_server_ = true;
+                    return false;
+                }
+            }
+
+            check_clients_thread_ = std::thread(&socks5_local_udp_proxy_server<T>::clear_thread, this);
+
+            return true;
+        }
+
+        /**
+         * @brief Stops the SOCKS5 local UDP proxy server and releases all resources.
+         *
+         * This method performs a graceful shutdown by:
+         * 1. Setting the end_server_ flag to signal shutdown
+         * 2. Closing the server socket, which causes the pending WSARecvFrom to complete with error
+         * 3. Cancelling each proxy socket's pending I/O (close_client) so its posted operations abort
+         * 4. Waiting for every proxy socket's overlapped I/O to drain (per-socket outstanding count)
+         *    and for all IOCP callbacks to finish
+         * 5. Releasing each socket's self-reference and clearing the map so the sockets destruct
+         * 6. Joining background threads
+         *
+         * The IOCP thread pool itself is managed by io_completion_port and will be
+         * properly shut down when the completion port is destroyed.
+         */
+        void stop()
+        {
+            if (end_server_ == true)
+            {
+                // already stopped
+                return;
+            }
+
+            // Step 1: Signal shutdown - IOCP lambda will check this and exit
+            end_server_ = true;
+            association_cv_.notify_all();
+            maintenance_cv_.notify_all();
+
+            // Step 2: Close server socket
+            // This causes the pending WSARecvFrom to complete with an error. Note the completion
+            // lambda's bool return is ignored by io_completion_port; shutdown is enforced by the
+            // end_server_ gate (which suppresses new work inside the lambda) and by unregistering
+            // the handler after the drain below.
+            if (server_socket_ != static_cast<SOCKET>(INVALID_SOCKET))
+            {
+                closesocket(server_socket_);
+                server_socket_ = INVALID_SOCKET;
+            }
+
+            // Step 3: Association workers may be inside a bounded blocking SOCKS5 handshake. Joining them
+            // here guarantees none can publish a relay after the proxy-socket drain begins.
+            for (auto& worker : association_workers_)
+            {
+                if (worker.joinable())
+                    worker.join();
+            }
+            association_workers_.clear();
+            release_all_pending_datagrams();
+
+            // NOTE: the IOCP handler stays registered until AFTER the drain below. The aborted
+            // completions produced by close_client()'s CancelIoEx must still dispatch through it so
+            // they release their heap contexts and decrement each socket's outstanding_io_;
+            // unregistering here would drop those completions and the drain would never complete.
+
+            // Step 4: Cancel every proxy socket's pending I/O so its posted operations complete
+            // promptly (aborted) and stop pinning the socket. Keep the sockets in the map for now --
+            // they must stay alive until their in-flight completions have drained. Simply clearing
+            // the map does NOT destroy them: each socket's recv io_context holds a self-reference,
+            // so the destructor would never run and the handle/armed recv would leak.
+            {
+                std::scoped_lock lock(lock_);
+                if (!proxy_sockets_.empty())
+                {
+                    NETLIB_DEBUG("Cancelling I/O on {} proxy sockets before draining", proxy_sockets_.size());
+                    for (auto& entry : proxy_sockets_)
+                    {
+                        if (entry.second)
+                            entry.second->close_client(); // idempotent: CancelIoEx + closesocket
+                    }
+                }
+            }
+
+            // Step 5: Wait until every proxy socket has drained all posted overlapped I/O (its
+            // per-socket outstanding count reaches zero) AND no IOCP callback is still running.
+            // The handler is still registered, so close_client()'s aborted completions dispatch,
+            // release their heap contexts, and the io_dec guard decrements the count. Gate on the
+            // per-socket count -- not just active_iocp_operations_ -- because a cancelled completion
+            // may still be queued (not yet dispatched) while active_iocp_operations_ momentarily
+            // reads zero; releasing a socket's self-reference before that completion is processed
+            // would free the io_context out from under it. Re-issue close_client() on any not-yet-
+            // drained socket each pass so a session armed concurrently with shutdown (e.g. a
+            // blocking connect that finished after end_server_ was set) is cancelled too.
+            // Exponential backoff to avoid busy-waiting.
+            using namespace std::chrono_literals;
+            int wait_iterations = 0;
+            bool drained_ok = false;
+
+            while (true)
+            {
+                bool drained = true;
+                {
+                    std::scoped_lock lock(lock_);
+                    for (auto& entry : proxy_sockets_)
+                    {
+                        if (entry.second && entry.second->outstanding_io() != 0)
+                        {
+                            drained = false;
+                            entry.second->close_client(); // idempotent; cancels late-armed sessions
+                        }
+                    }
+                }
+
+                if (drained && active_iocp_operations_.load(std::memory_order_acquire) == 0)
+                {
+                    drained_ok = true;
+                    break;
+                }
+
+                if (constexpr int max_wait_iterations = 100; ++wait_iterations > max_wait_iterations)
+                {
+                    NETLIB_ERROR("Timeout waiting for proxy socket I/O to drain (active operations: {}); "
+                        "leaving sessions pinned to avoid freeing in-flight io_contexts",
+                        active_iocp_operations_.load(std::memory_order_relaxed));
+                    break;
+                }
+
+                // Exponential backoff: 1ms, 2ms, 4ms, 8ms, ... up to 100ms
+                const auto wait_time = std::min(1ms * (1 << std::min(wait_iterations / 10, 6)), 100ms);
+                std::this_thread::sleep_for(wait_time);
+            }
+
+            // Step 5b: Regardless of how the drain loop exited, make sure no IOCP callback is still
+            // executing before we proceed. A worker inside the completion lambda has captured `this`
+            // (it touches lock_, end_server_, packet_pool_, server_io_context_ and decrements
+            // active_iocp_operations_ on the way out), so unregistering the handler and returning
+            // from stop() while active_iocp_operations_ > 0 risks a use-after-free of the server if
+            // the object is then destroyed. On the happy path this is already zero (it is part of
+            // the break condition above); on the timeout path we still wait here. Lambdas are
+            // bounded work, so this reliably reaches zero; bound it as a last resort.
+            for (int active_wait = 0;
+                 active_iocp_operations_.load(std::memory_order_acquire) != 0;
+                 ++active_wait)
+            {
+                if (active_wait > 200)
+                {
+                    NETLIB_ERROR("IOCP callbacks still active ({}) after drain; proceeding may be unsafe",
+                        active_iocp_operations_.load(std::memory_order_relaxed));
+                    break;
+                }
+                std::this_thread::sleep_for(std::min(1ms * (1 << std::min(active_wait / 10, 6)), 100ms));
+            }
+
+            // Step 6: All completions have now been processed (or we timed out), so unregister the
+            // IOCP handler -- no further completion will dispatch into this server.
+            if (completion_key_ != 0)
+            {
+                (void)completion_port_.unregister_handler(completion_key_);
+                completion_key_ = 0;
+            }
+
+            // Step 7: Only if the drain completed do we break each socket's self-reference and clear
+            // the map so the sockets (and their already-released heap I/O contexts) destruct. If the
+            // drain timed out, some overlapped op is still outstanding; releasing/clearing now would
+            // free an io_context that a still-queued completion could dereference, so we deliberately
+            // leak those sessions instead (a bounded, shutdown-only leak) rather than risk a UAF.
+            if (drained_ok)
+            {
+                std::scoped_lock lock(lock_);
+                for (auto& entry : proxy_sockets_)
+                {
+                    if (entry.second)
+                        entry.second->release_self_reference();
+                }
+                proxy_sockets_.clear();
+            }
+
+            // Step 8: Join background threads
+            if (proxy_server_.joinable())
+            {
+                proxy_server_.join();
+            }
+
+            if (check_clients_thread_.joinable())
+            {
+                check_clients_thread_.join();
+            }
+        }
+
+    private:
+        /**
+         * @brief Queries remote host information for outgoing connection by local peer IP address and port.
+         *
+         * This method uses the configured query_remote_peer_ function to determine the remote peer
+         * (address, port, and negotiation context) for a given local peer address and UDP port.
+         * If no query function is set, it returns a default-constructed tuple with empty address,
+         * port 0, and nullptr negotiation context.
+         *
+         * @param accepted_peer_address The local peer's IP address.
+         * @param accepted_peer_port The local peer's UDP port.
+         * @return Tuple containing the remote address, remote port, and a unique pointer to the negotiation context.
+         */
+        std::tuple<address_type_t, uint16_t, std::unique_ptr<negotiate_context_t>> get_remote_peer(
+            address_type_t accepted_peer_address, unsigned short accepted_peer_port) const
+        {
+            if (query_remote_peer_)
+            {
+                return query_remote_peer_(accepted_peer_address, accepted_peer_port);
+            }
+
+            return std::make_tuple(address_type_t{}, 0, nullptr);
+        }
+
+        void commit_remote_peer(const address_type_t accepted_peer_address,
+            const uint16_t accepted_peer_port) const noexcept
+        {
+            if (!commit_remote_peer_)
+                return;
+
+            try
+            {
+                commit_remote_peer_(accepted_peer_address, accepted_peer_port);
+            }
+            catch (const std::exception& e)
+            {
+                NETLIB_WARNING("Failed to commit UDP source-port mapping {}: {}", accepted_peer_port, e.what());
+            }
+            catch (...)
+            {
+                NETLIB_WARNING("Failed to commit UDP source-port mapping {}: unknown error", accepted_peer_port);
+            }
+        }
+
+        /**
+         * @brief Creates and binds the UDP server socket for the proxy server.
+         *
+         * This method creates a UDP socket (IPv4 or IPv6 depending on address_type_t::af_type),
+         * binds it to the specified proxy_port_, and updates proxy_port_ if it was initially zero.
+         * On failure, the socket is closed and INVALID_SOCKET is set.
+         *
+         * @return True if the socket was successfully created and bound, false otherwise.
+         */
+        bool create_server_socket()
+        {
+            server_socket_ = WSASocket(address_type_t::af_type, SOCK_DGRAM, IPPROTO_UDP, nullptr, 0,
+                WSA_FLAG_OVERLAPPED);
+
+            if (server_socket_ == static_cast<SOCKET>(INVALID_SOCKET))
+            {
+                return false;
+            }
+
+            // Disable SIO_UDP_CONNRESET. Without this, a prior datagram that elicited an ICMP
+            // port-unreachable from a since-closed local peer makes the NEXT WSARecvFrom complete
+            // with WSAECONNRESET, which would tear down the server read loop and stop proxying all
+            // UDP. UDP is connectionless, so this "connection reset" is spurious -- suppress it.
+            {
+                BOOL new_behavior = FALSE;
+                DWORD bytes_returned = 0;
+                if (WSAIoctl(server_socket_, SIO_UDP_CONNRESET, &new_behavior, sizeof(new_behavior),
+                    nullptr, 0, &bytes_returned, nullptr, nullptr) == SOCKET_ERROR)
+                {
+                    NETLIB_WARNING("create_server_socket: failed to disable SIO_UDP_CONNRESET: {}",
+                        WSAGetLastError());
+                }
+            }
+
+            tune_udp_socket_buffers(server_socket_, "local UDP proxy server socket");
+
+            if constexpr (address_type_t::af_type == AF_INET)
+            {
+                sockaddr_in service{};
+                service.sin_family = address_type_t::af_type;
+                service.sin_port = htons(proxy_port_);
+                service.sin_addr.s_addr = htonl(INADDR_ANY);
+
+                if (const auto status = bind(server_socket_, reinterpret_cast<SOCKADDR*>(&service), sizeof(service));
+                    status == SOCKET_ERROR)
+                {
+                    closesocket(server_socket_);
+                    server_socket_ = INVALID_SOCKET;
+                    return false;
+                }
+
+                if (proxy_port_ == 0)
+                {
+                    int name_length = sizeof(service);
+                    if (0 == getsockname(server_socket_, reinterpret_cast<SOCKADDR*>(&service), &name_length))
+                    {
+                        proxy_port_ = ntohs(service.sin_port);
+                    }
+                    else
+                    {
+                        closesocket(server_socket_);
+                        server_socket_ = INVALID_SOCKET;
+                        return false;
+                    }
+                }
+            }
+            else
+            {
+                sockaddr_in6 service;
+                service.sin6_family = address_type_t::af_type;
+                service.sin6_port = htons(proxy_port_);
+                service.sin6_flowinfo = 0;
+                service.sin6_addr = in6addr_any;
+                service.sin6_scope_id = 0;
+
+                if (const auto status = bind(server_socket_, reinterpret_cast<SOCKADDR*>(&service), sizeof(service));
+                    status == SOCKET_ERROR)
+                {
+                    closesocket(server_socket_);
+                    server_socket_ = INVALID_SOCKET;
+                    return false;
+                }
+
+                if (proxy_port_ == 0)
+                {
+                    int name_length = sizeof(service);
+                    if (0 == getsockname(server_socket_, reinterpret_cast<SOCKADDR*>(&service), &name_length))
+                    {
+                        proxy_port_ = ntohs(service.sin6_port);
+                    }
+                    else
+                    {
+                        closesocket(server_socket_);
+                        server_socket_ = INVALID_SOCKET;
+                        return false;
+                    }
+                }
+            }
+
+            return true;
+        }
+
+        /**
+         * @brief Establishes a TCP connection to the specified SOCKS5 proxy server.
+         *
+         * This method creates a non-blocking TCP socket (IPv4 or IPv6 depending on address_type_t::af_type),
+         * binds it to a local ephemeral port, and connects it to the given SOCKS5 proxy server address and port.
+         * On failure, the socket is closed and INVALID_SOCKET is returned.
+         *
+         * @param socks_server_address The address of the SOCKS5 proxy server to connect to.
+         * @param socks_server_port The port of the SOCKS5 proxy server.
+         * @return A connected TCP SOCKET handle, or INVALID_SOCKET on failure.
+         */
+        SOCKET connect_to_socks5_proxy(address_type_t socks_server_address, const uint16_t socks_server_port)
+        {
+            auto socks_tcp_socket = WSASocket(address_type_t::af_type, SOCK_STREAM, IPPROTO_TCP, nullptr, 0,
+                WSA_FLAG_OVERLAPPED);
+
+            if (socks_tcp_socket == INVALID_SOCKET)
+            {
+                return INVALID_SOCKET;
+            }
+
+            // Set socket timeouts to prevent indefinite blocking in recv/send calls
+            // This prevents deadlock where IOCP worker holds lock_ while blocked on network I/O
+            constexpr DWORD timeout_ms = 5000; // 5 second timeout
+            if (setsockopt(socks_tcp_socket, SOL_SOCKET, SO_RCVTIMEO, 
+                          reinterpret_cast<const char*>(&timeout_ms), sizeof(timeout_ms)) == SOCKET_ERROR)
+            {
+                NETLIB_WARNING("Failed to set socket receive timeout: {}", WSAGetLastError());
+                closesocket(socks_tcp_socket);
+                return INVALID_SOCKET;
+            }
+            
+            if (setsockopt(socks_tcp_socket, SOL_SOCKET, SO_SNDTIMEO, 
+                          reinterpret_cast<const char*>(&timeout_ms), sizeof(timeout_ms)) == SOCKET_ERROR)
+            {
+                NETLIB_WARNING("Failed to set socket send timeout: {}", WSAGetLastError());
+                closesocket(socks_tcp_socket);
+                return INVALID_SOCKET;
+            }
+
+            if constexpr (address_type_t::af_type == AF_INET)
+            {
+                sockaddr_in sa_local{};
+                sa_local.sin_family = address_type_t::af_type;
+                sa_local.sin_port = htons(0);
+                sa_local.sin_addr.s_addr = htonl(INADDR_ANY);
+
+                if (const auto status = bind(socks_tcp_socket, reinterpret_cast<sockaddr*>(&sa_local), sizeof(sa_local))
+                    ; status == SOCKET_ERROR)
+                {
+                    closesocket(socks_tcp_socket);
+                    return INVALID_SOCKET;
+                }
+            }
+            else
+            {
+                // Allow this AF_INET6 upstream control socket to reach IPv4 SOCKS5
+                // servers via IPv4-mapped addresses (e.g. ::ffff:127.0.0.1) by
+                // clearing IPV6_V6ONLY so the dual-stack socket accepts both families.
+                DWORD v6_only = 0;
+                if (setsockopt(socks_tcp_socket, IPPROTO_IPV6, IPV6_V6ONLY,
+                    reinterpret_cast<const char*>(&v6_only), sizeof(v6_only)) == SOCKET_ERROR)
+                {
+                    NETLIB_WARNING("Failed to clear IPV6_V6ONLY on SOCKS5 control socket: {}", WSAGetLastError());
+                }
+
+                sockaddr_in6 sa_local{};
+                sa_local.sin6_family = address_type_t::af_type;
+                sa_local.sin6_port = htons(0);
+                sa_local.sin6_addr = in6addr_any;
+
+                if (const auto status = bind(socks_tcp_socket, reinterpret_cast<sockaddr*>(&sa_local), sizeof(sa_local))
+                    ; status == SOCKET_ERROR)
+                {
+                    closesocket(socks_tcp_socket);
+                    return INVALID_SOCKET;
+                }
+            }
+
+            // connect to server
+            if constexpr (address_type_t::af_type == AF_INET)
+            {
+                sockaddr_in sa_service{};
+                sa_service.sin_family = address_type_t::af_type;
+                sa_service.sin_addr = socks_server_address;
+                sa_service.sin_port = htons(socks_server_port);
+
+                if (!connect_with_timeout(socks_tcp_socket, reinterpret_cast<SOCKADDR*>(&sa_service),
+                    sizeof(sa_service), 5000))
+                {
+                    closesocket(socks_tcp_socket);
+                    return INVALID_SOCKET;
+                }
+            }
+            else
+            {
+                sockaddr_in6 sa_service{};
+                sa_service.sin6_family = address_type_t::af_type;
+                sa_service.sin6_addr = socks_server_address;
+                sa_service.sin6_port = htons(socks_server_port);
+
+                if (!connect_with_timeout(socks_tcp_socket, reinterpret_cast<SOCKADDR*>(&sa_service),
+                    sizeof(sa_service), 5000))
+                {
+                    closesocket(socks_tcp_socket);
+                    return INVALID_SOCKET;
+                }
+            }
+
+            return socks_tcp_socket;
+        }
+
+        /**
+         * @brief Connects a socket with a bounded timeout.
+         *
+         * A plain blocking connect() is not bounded by SO_*TIMEO and can hang for the OS
+         * default TCP connect timeout (~21s) on a black-holed SOCKS5 server while this thread
+         * holds the server lock, stalling all UDP relay. This switches the socket to
+         * non-blocking, issues the connect, and waits with select() up to timeout_ms, then
+         * restores blocking mode for the subsequent SO_*TIMEO-bounded send/recv.
+         *
+         * @return true if the connection completed within the timeout, false otherwise.
+         */
+        static bool connect_with_timeout(const SOCKET s, const sockaddr* const addr, const int addr_len,
+                                         const DWORD timeout_ms) noexcept
+        {
+            u_long non_blocking = 1;
+            if (ioctlsocket(s, FIONBIO, &non_blocking) == SOCKET_ERROR)
+                return false;
+
+            auto succeeded = false;
+            if (connect(s, addr, addr_len) == 0)
+            {
+                succeeded = true;
+            }
+            else if (WSAGetLastError() == WSAEWOULDBLOCK)
+            {
+                fd_set write_set;
+                FD_ZERO(&write_set);
+                FD_SET(s, &write_set);
+                fd_set error_set;
+                FD_ZERO(&error_set);
+                FD_SET(s, &error_set);
+
+                timeval tv;
+                tv.tv_sec = static_cast<long>(timeout_ms / 1000);
+                tv.tv_usec = static_cast<long>((timeout_ms % 1000) * 1000);
+
+                if (const auto sel = select(0, nullptr, &write_set, &error_set, &tv);
+                    sel > 0 && FD_ISSET(s, &write_set))
+                {
+                    auto so_error = 0;
+                    auto len = static_cast<int>(sizeof(so_error));
+                    if (getsockopt(s, SOL_SOCKET, SO_ERROR, reinterpret_cast<char*>(&so_error), &len) == 0 &&
+                        so_error == 0)
+                    {
+                        succeeded = true;
+                    }
+                }
+            }
+
+            // Restore blocking mode for the subsequent SO_*TIMEO-bounded send/recv. If the
+            // socket connected but cannot be put back into blocking mode, fail the connect so
+            // the caller closes it rather than issuing blocking send/recv on a still-non-blocking
+            // socket (which would spuriously return WSAEWOULDBLOCK and break negotiation).
+            u_long blocking = 0;
+            if (ioctlsocket(s, FIONBIO, &blocking) == SOCKET_ERROR)
+                return false;
+            return succeeded;
+        }
+
+        /**
+         * @brief Performs SOCKS5 negotiation and sends the UDP ASSOCIATE command.
+         *
+         * This method negotiates authentication with the SOCKS5 proxy server over the provided TCP socket,
+         * using either "NO AUTHENTICATION REQUIRED" or "USERNAME/PASSWORD" (RFC 1929) as needed.
+         * If authentication succeeds, it sends a UDP ASSOCIATE command to the proxy and retrieves the
+         * UDP relay endpoint assigned by the proxy for relaying UDP packets.
+         *
+         * @param socks_tcp_socket The connected TCP socket to the SOCKS5 proxy server.
+         * @param negotiate_ctx Unique pointer to the negotiation context, containing optional credentials.
+         * @return The UDP relay endpoint assigned by the SOCKS5 proxy, or std::nullopt on failure.
+         */
+        [[nodiscard]] std::optional<net::ip_endpoint<address_type_t>> associate_to_socks5_proxy(
+            const SOCKET socks_tcp_socket,
+            const address_type_t socks_server_address,
+            std::unique_ptr<negotiate_context_t>&
+            negotiate_ctx) const
+        {
+            using namespace std::string_literals;
+
+            socks5_ident_req<2> ident_req{};
+            socks5_ident_resp ident_resp{};
+
+            auto socks5_ident_req_size = sizeof(ident_req);
+
+            ident_req.methods[0] = 0x0; // RFC 1928: X'00' NO AUTHENTICATION REQUIRED
+            ident_req.methods[1] = 0x2; // RFC 1928: X'02' USERNAME/PASSWORD
+
+            // Don't suggest username/password option if not provided
+            if (!negotiate_ctx->socks5_username.has_value())
+            {
+                ident_req.number_of_methods = 1;
+                socks5_ident_req_size = sizeof(socks5_ident_req<1>);
+            }
+
+            std::unique_ptr<schannel_tls_stream> tls_stream;
+            if (negotiate_ctx->upstream_options.is_tls())
+            {
+                tls_stream = std::make_unique<schannel_tls_stream>(
+                    socks_tcp_socket,
+                    negotiate_ctx->upstream_options.tls);
+                if (!tls_stream->handshake())
+                {
+                    NETLIB_INFO(
+                        "[SOCKS5TLS]: associate_to_socks5_proxy: TLS handshake failed: {}",
+                        tls_stream->last_error());
+                    return {};
+                }
+            }
+
+            auto control_socket_error = 0;
+            const auto send_all_raw = [socks_tcp_socket, &control_socket_error](
+                const void* const buffer, const int len) -> bool
+            {
+                control_socket_error = 0;
+                auto* bytes = static_cast<const char*>(buffer);
+                int sent_total = 0;
+                while (sent_total < len)
+                {
+                    const auto sent = send(socks_tcp_socket, bytes + sent_total, len - sent_total, 0);
+                    if (sent == SOCKET_ERROR)
+                    {
+                        control_socket_error = WSAGetLastError();
+                        return false;
+                    }
+                    if (sent == 0)
+                    {
+                        control_socket_error = WSAECONNRESET;
+                        return false;
+                    }
+                    sent_total += sent;
+                }
+                return true;
+            };
+
+            // Blocking read of exactly 'len' bytes (recv() may return short reads on a
+            // stream socket); returns false on error or premature close.
+            const auto recv_exact_raw = [&control_socket_error](
+                const SOCKET s, void* const buffer, const int len) -> bool
+            {
+                control_socket_error = 0;
+                // Bound the TOTAL time spent assembling these bytes, not just each recv().
+                // SO_RCVTIMEO is a per-call timeout, so a server that drips one byte just
+                // under it could otherwise keep this loop alive for timeout * byte-count.
+                constexpr DWORD total_timeout_ms = 5000;
+
+                DWORD original_timeout = total_timeout_ms;
+                int original_timeout_size = static_cast<int>(sizeof(original_timeout));
+                getsockopt(s, SOL_SOCKET, SO_RCVTIMEO,
+                    reinterpret_cast<char*>(&original_timeout), &original_timeout_size);
+
+                const auto restore_timeout = [s, original_timeout]  // NOLINT(clang-diagnostic-padded)
+                {
+                    setsockopt(s, SOL_SOCKET, SO_RCVTIMEO,
+                        reinterpret_cast<const char*>(&original_timeout), sizeof(original_timeout));
+                };
+
+                auto* const bytes = static_cast<char*>(buffer);
+                const auto deadline = GetTickCount64() + total_timeout_ms;
+                int received = 0;
+                while (received < len)
+                {
+                    const auto now = GetTickCount64();
+                    if (now >= deadline)
+                    {
+                        control_socket_error = WSAETIMEDOUT;
+                        restore_timeout();
+                        return false;
+                    }
+
+                    auto remaining_ms = static_cast<DWORD>(deadline - now);
+                    if (setsockopt(s, SOL_SOCKET, SO_RCVTIMEO,
+                        reinterpret_cast<const char*>(&remaining_ms), sizeof(remaining_ms)) == SOCKET_ERROR)
+                    {
+                        control_socket_error = WSAGetLastError();
+                        restore_timeout();
+                        return false;
+                    }
+
+                    const auto n = recv(s, bytes + received, len - received, 0);
+                    if (n == SOCKET_ERROR)
+                    {
+                        control_socket_error = WSAGetLastError();
+                        restore_timeout();
+                        return false;
+                    }
+                    if (n == 0)
+                    {
+                        control_socket_error = WSAECONNRESET;
+                        restore_timeout();
+                        return false;
+                    }
+                    received += n;
+                }
+
+                restore_timeout();
+                return true;
+            };
+
+            const auto send_control = [&tls_stream, &send_all_raw](const void* const buffer, const int len) -> bool
+            {
+                return tls_stream ? tls_stream->send_all(buffer, len) : send_all_raw(buffer, len);
+            };
+
+            const auto recv_control = [&tls_stream, socks_tcp_socket, &recv_exact_raw](void* const buffer, const int len) -> bool
+            {
+                return tls_stream ? tls_stream->recv_exact(buffer, len) : recv_exact_raw(socks_tcp_socket, buffer, len);
+            };
+
+            const auto control_error = [&tls_stream, &control_socket_error]
+            {
+                return tls_stream
+                    ? tls_stream->last_error()
+                    : std::to_string(control_socket_error);
+            };
+
+            if (!send_control(reinterpret_cast<const char*>(&ident_req),
+                static_cast<int>(socks5_ident_req_size)))
+            {
+                NETLIB_INFO(
+                    "[SOCKS5]: associate_to_socks5_proxy: Failed to send socks5_ident_req: {}",
+                    control_error());
+                return {};
+            }
+
+            if (!recv_control(reinterpret_cast<char*>(&ident_resp), sizeof(ident_resp)))
+            {
+                NETLIB_INFO(
+                    "[SOCKS5]: associate_to_socks5_proxy: Failed to receive socks5_ident_resp: {}",
+                    control_error());
+                return {};
+            }
+
+            if ((ident_resp.version != socks5_protocol_version) ||
+                (ident_resp.method != 0x00 && ident_resp.method != 0x02))
+            {
+                NETLIB_INFO(
+                    "[SOCKS5]: associate_to_socks5_proxy: SOCKS5 selected an unsupported authentication method");
+                return {};
+            }
+
+            if (ident_resp.method == 0x2)
+            {
+                if (!negotiate_ctx->socks5_username.has_value())
+                {
+                    NETLIB_INFO(
+                        "[SOCKS5]: associate_to_socks5_proxy: RFC 1928: X'02' USERNAME/PASSWORD is chosen but USERNAME is not provided");
+                    return {};
+                }
+
+                if (negotiate_ctx->socks5_username.value().length() > socks5_username_max_length || 
+                    negotiate_ctx->socks5_username.value().length() < 1)
+                {
+                    NETLIB_INFO(
+                        "[SOCKS5]: associate_to_socks5_proxy: RFC 1928: X'02' USERNAME/PASSWORD is chosen but USERNAME exceeds maximum possible length");
+                    return {};
+                }
+
+                if (!negotiate_ctx->socks5_password.has_value())
+                {
+                    NETLIB_INFO(
+                        "[SOCKS5]: associate_to_socks5_proxy: RFC 1928: X'02' USERNAME/PASSWORD is chosen but PASSWORD is not provided");
+                    return {};
+                }
+
+                if (negotiate_ctx->socks5_password.value().length() > socks5_username_max_length || 
+                    negotiate_ctx->socks5_password.value().length() < 1)
+                {
+                    NETLIB_INFO(
+                        "[SOCKS5]: associate_to_socks5_proxy: RFC 1928: X'02' USERNAME/PASSWORD is chosen but PASSWORD exceeds maximum possible length");
+                    return {};
+                }
+
+                const socks5_username_auth auth_req(
+                    negotiate_ctx->socks5_username.value(),
+                    negotiate_ctx->socks5_password.value()
+                );
+
+                if (!send_control(reinterpret_cast<const char*>(&auth_req),
+                    3 + static_cast<int>(negotiate_ctx->socks5_username.value().length()) + 
+                    static_cast<int>(negotiate_ctx->socks5_password.value().length())))
+                {
+                    NETLIB_INFO(
+                        "[SOCKS5]: associate_to_socks5_proxy: Failed to send socks5_username_auth: {}",
+                        control_error());
+                    return {};
+                }
+
+                if (!recv_control(reinterpret_cast<char*>(&ident_resp), sizeof(ident_resp)))
+                {
+                    NETLIB_INFO(
+                        "[SOCKS5]: associate_to_socks5_proxy: Failed to receive socks5_ident_resp: {}",
+                        control_error());
+                    return {};
+                }
+
+                if (ident_resp.version != socks5_username_auth_version || ident_resp.method != 0x00)
+                {
+                    NETLIB_INFO(
+                        "[SOCKS5]: associate_to_socks5_proxy: USERNAME/PASSWORD authentication has failed!");
+                    return {};
+                }
+
+                NETLIB_DEBUG(
+                    "[SOCKS5]: associate_to_socks5_proxy: USERNAME/PASSWORD authentication SUCCESS");
+            }
+
+            // Build the UDP ASSOCIATE request. DST.ADDR/DST.PORT only advertise the
+            // address the client expects to send datagrams from; we advertise the
+            // unspecified address. The ATYP must match the family actually used on the
+            // wire: the IPv6 proxy instance reaches the (IPv4) SOCKS5 server through an
+            // IPv4-mapped upstream, so an IPv4-only server would reject an ATYP=4 request.
+            // Send ATYP=1 with a zero IPv4 address whenever the upstream is IPv4 or
+            // IPv4-mapped, and ATYP=4 only for a genuine IPv6 upstream.
+            unsigned char associate_req_buf[4 + sizeof(in6_addr) + sizeof(unsigned short)]{};
+            associate_req_buf[0] = 5; // VER
+            associate_req_buf[1] = 3; // CMD = UDP ASSOCIATE
+            associate_req_buf[2] = 0; // RSV
+            int associate_req_len;
+            if constexpr (address_type_t::af_type == AF_INET)
+            {
+                associate_req_buf[3] = 1; // ATYP = IPv4
+                associate_req_len = 4 + 4 + static_cast<int>(sizeof(unsigned short));
+            }
+            else
+            {
+                if (IN6_IS_ADDR_V4MAPPED(static_cast<const in6_addr*>(&socks_server_address)))
+                {
+                    associate_req_buf[3] = 1; // ATYP = IPv4 (IPv4-mapped upstream)
+                    associate_req_len = 4 + 4 + static_cast<int>(sizeof(unsigned short));
+                }
+                else
+                {
+                    associate_req_buf[3] = 4; // ATYP = IPv6 (genuine IPv6 upstream)
+                    associate_req_len = 4 + static_cast<int>(sizeof(in6_addr)) + static_cast<int>(sizeof(unsigned short));
+                }
+            }
+            if (!send_control(reinterpret_cast<const char*>(associate_req_buf), associate_req_len))
+            {
+                NETLIB_INFO(
+                    "[SOCKS5]: associate_to_socks5_proxy: Failed to send SOCKS5 ASSOCIATE request: {}",
+                    control_error());
+                return {};
+            }
+
+            // Read and validate the SOCKS5 UDP ASSOCIATE reply. The reply's BND.ADDR
+            // family (ATYP) is selected by the SERVER and is independent of the address
+            // family this proxy instance uses: an IPv6 proxy instance reaches the
+            // configured (IPv4) SOCKS5 server through an IPv4-mapped upstream, so the
+            // server typically replies with ATYP=1 and a 4-byte BND.ADDR. Parsing the
+            // reply as a fixed-size socks5_resp<address_type_t> (which has a 16-byte
+            // BND.ADDR for IPv6) would then read BND.PORT from the wrong offset and
+            // hand back a bogus relay port. Parse the 4-byte reply prefix, then read
+            // exactly the bytes implied by the returned ATYP and take BND.PORT from the
+            // correct position so the relay port is family-agnostic and correct.
+
+            // Fixed 4-byte reply prefix: VER, REP, RSV, ATYP.
+            struct socks5_resp_prefix
+            {
+                unsigned char version;
+                unsigned char reply;
+                unsigned char reserved;
+                unsigned char address_type;
+            } resp_prefix{};
+
+            if (!recv_control(&resp_prefix, sizeof(resp_prefix)))
+            {
+                NETLIB_INFO(
+                    "[SOCKS5]: associate_to_socks5_proxy: Failed to receive SOCKS5 ASSOCIATE reply header: {}",
+                    control_error());
+                return {};
+            }
+
+            if ((resp_prefix.version != socks5_protocol_version) ||
+                (resp_prefix.reply != 0) ||
+                (resp_prefix.reserved != 0))
+            {
+                NETLIB_INFO(
+                    "[SOCKS5]: associate_to_socks5_proxy: SOCKS5 ASSOCIATE has failed");
+                return {};
+            }
+
+            // Determine BND.ADDR length from the server-selected ATYP. For ATYP=3
+            // (domain) the first byte carries the name length.
+            int bnd_addr_len;
+            switch (resp_prefix.address_type)
+            {
+            case 1: // IPv4
+                bnd_addr_len = 4;
+                break;
+            case 4: // IPv6
+                bnd_addr_len = 16;
+                break;
+            case 3: // domain name
+                {
+                    unsigned char domain_len = 0;
+                    if (!recv_control(&domain_len, sizeof(domain_len)))
+                    {
+                        NETLIB_INFO(
+                            "[SOCKS5]: associate_to_socks5_proxy: Failed to receive BND.ADDR domain length: {}",
+                            control_error());
+                        return {};
+                    }
+                    if (domain_len == 0)
+                    {
+                        NETLIB_INFO(
+                            "[SOCKS5]: associate_to_socks5_proxy: Empty BND.ADDR domain in ASSOCIATE reply");
+                        return {};
+                    }
+                    bnd_addr_len = domain_len;
+                }
+                break;
+            default:
+                NETLIB_INFO(
+                    "[SOCKS5]: associate_to_socks5_proxy: Unexpected BND.ADDR type {} in ASSOCIATE reply",
+                    resp_prefix.address_type);
+                return {};
+            }
+
+            // Read BND.ADDR followed by the 2-byte BND.PORT. The buffer is sized for the
+            // largest possible BND.ADDR (a 255-byte domain) plus the port.
+            unsigned char bnd_addr_and_port[255 + sizeof(unsigned short)]{};
+            if (!recv_control(bnd_addr_and_port,
+                bnd_addr_len + static_cast<int>(sizeof(unsigned short))))
+            {
+                NETLIB_INFO(
+                    "[SOCKS5]: associate_to_socks5_proxy: Failed to receive BND.ADDR/BND.PORT: {}",
+                    control_error());
+                return {};
+            }
+
+            // BND.PORT immediately follows BND.ADDR, in network byte order. Assembling
+            // the two big-endian bytes directly yields the host-order port value.
+            const auto bind_port = static_cast<uint16_t>(
+                (static_cast<uint16_t>(bnd_addr_and_port[bnd_addr_len]) << 8) |
+                static_cast<uint16_t>(bnd_addr_and_port[bnd_addr_len + 1]));
+
+            // The UDP relay endpoint is, in every deployment ProxiFyre supports, the same
+            // host as the SOCKS5 server we connected the control socket to. Servers
+            // frequently report a BND.ADDR that is only meaningful from their own vantage
+            // point (0.0.0.0, 127.0.0.1, or an internal/NAT address), so honoring it
+            // verbatim can aim the relay at an address the client cannot reach -- and it
+            // would also turn a server-supplied address into a connect() target. We
+            // therefore relay to the address we already reached over the control
+            // connection (socks_server_address -- the IPv4-mapped upstream for the IPv6
+            // instance) and take only BND.PORT from the reply. BND.PORT was parsed at the
+            // family-correct offset above, so the relay port is correct regardless of the
+            // ATYP the server selected, and no blocking DNS lookup is needed for an
+            // ATYP=3 (domain) reply.
+            NETLIB_DEBUG(
+                "[SOCKS5]: associate_to_socks5_proxy: SOCKS5 ASSOCIATE SUCCESS endpoint: {}:{}",
+                socks_server_address,
+                bind_port);
+
+            return net::ip_endpoint<address_type_t>{ socks_server_address, bind_port };
+        }
+
+        /**
+         * @brief Establishes a UDP relay session to a remote host through a SOCKS5 proxy.
+         *
+         * This method is responsible for setting up a UDP relay for a new client connection.
+         * It determines the local peer's address and port from the captured UDP sender,
+         * checks if a proxy socket for this client already exists, and if not:
+         *   - Resolves the remote SOCKS5 proxy address, port, and negotiation context.
+         *   - Establishes a TCP connection to the SOCKS5 proxy and performs authentication/negotiation.
+         *   - Issues a UDP ASSOCIATE command to the proxy and retrieves the assigned UDP port.
+         *   - Creates and binds a UDP socket for relaying packets to the proxy.
+         *   - Connects the UDP socket to the proxy and stores the session in the proxy_sockets_ map.
+         *   - Associates the new proxy socket with the I/O completion port and starts it.
+         *
+         * If any step fails, all resources are cleaned up and the method returns false.
+         *
+         * @param local_peer_sa Address of the local UDP sender captured with its datagram.
+         * @param lock Server mutex lock. Blocking setup temporarily releases it.
+         * @param proxy_socket Receives the established or existing relay session.
+         * @return True if the relay session was established or already exists, false on failure.
+         */
+        bool connect_to_remote_host(const SOCKADDR_STORAGE& local_peer_sa, std::unique_lock<std::mutex>& lock,
+            std::shared_ptr<T>& proxy_socket)
+        {
+            const auto local_endpoint = local_endpoint_from(local_peer_sa);
+            if (!local_endpoint || local_endpoint->second == 0)
+                return false;
+
+            const auto& [local_peer_address, local_peer_port] = *local_endpoint;
+
+            // Lookup an existing proxy socket
+            if (auto it = proxy_sockets_.find(local_peer_port); it != proxy_sockets_.end())
+            {
+                proxy_socket = it->second;
+                // Each redirected datagram refreshes the router's source-port
+                // authorization. Consume that refresh even when the relay session
+                // already exists so no stale authorization is left behind.
+                commit_remote_peer(local_peer_address, local_peer_port);
+                return true;
+            }
+
+            auto [remote_address, remote_port, negotiate_ctx] =
+                get_remote_peer(local_peer_address, local_peer_port);
+
+            if (remote_port == 0 || !negotiate_ctx)
+            {
+                NETLIB_DEBUG(
+                    "connect_to_remote_host: No valid UDP source-port mapping for {}:{}",
+                    local_peer_address,
+                    local_peer_port);
+                return false;
+            }
+
+            NETLIB_DEBUG(
+                "connect_to_remote_host: Connect to SOCKS5 proxy and send ASSOCIATE command: {}:{}",
+                remote_address,
+                remote_port);
+
+            // SOCKS5 TCP connect + ASSOCIATE is blocking and may take several seconds. This method
+            // runs only on the dedicated association workers, and releases lock_ so independent
+            // source ports and ordinary relay completions continue. stop() joins the workers before
+            // tearing down published sessions. Every early return below re-acquires lock_.
+            lock.unlock();
+
+            auto socks5_tcp_socket = connect_to_socks5_proxy(remote_address, remote_port);
+            if (socks5_tcp_socket == INVALID_SOCKET)
+            {
+                NETLIB_DEBUG(
+                    "connect_to_remote_host: Failed to connect to SOCKS5 proxy: {}:{}",
+                    remote_address,
+                    remote_port);
+                lock.lock();
+                return false;
+            }
+
+            std::optional<net::ip_endpoint<address_type_t>> udp_endpoint;
+            try
+            {
+                udp_endpoint = associate_to_socks5_proxy(socks5_tcp_socket, remote_address, negotiate_ctx);
+            }
+            catch (...)
+            {
+                closesocket(socks5_tcp_socket);
+                lock.lock();
+                throw;
+            }
+            if (!udp_endpoint.has_value())
+            {
+                NETLIB_DEBUG(
+                    "connect_to_remote_host: ASSOCIATE command has failed: {}:{}",
+                    remote_address,
+                    remote_port);
+
+                closesocket(socks5_tcp_socket);
+                lock.lock();
+                return false;
+            }
+
+            NETLIB_DEBUG(
+                "connect_to_remote_host: UDP connect: {}:{}",
+                udp_endpoint->ip,
+                udp_endpoint->port);
+
+            auto remote_socket = WSASocket(address_type_t::af_type, SOCK_DGRAM, IPPROTO_UDP, nullptr, 0,
+                WSA_FLAG_OVERLAPPED);
+
+            if (remote_socket == INVALID_SOCKET)
+            {
+                NETLIB_DEBUG(
+                    "connect_to_remote_host: Failed to create UDP socket: {}",
+                    WSAGetLastError());
+                closesocket(socks5_tcp_socket);
+                lock.lock();
+                return false;
+            }
+
+            tune_udp_socket_buffers(remote_socket, "SOCKS5 UDP relay socket");
+
+            // Suppress spurious WSAECONNRESET on the relay socket too (see create_server_socket):
+            // an ICMP port-unreachable from the SOCKS5 UDP relay must not kill this relay's reads.
+            {
+                BOOL new_behavior = FALSE;
+                DWORD bytes_returned = 0;
+                if (WSAIoctl(remote_socket, SIO_UDP_CONNRESET, &new_behavior, sizeof(new_behavior),
+                    nullptr, 0, &bytes_returned, nullptr, nullptr) == SOCKET_ERROR)
+                {
+                    NETLIB_WARNING("connect_to_remote_host: failed to disable SIO_UDP_CONNRESET on relay socket: {}",
+                        WSAGetLastError());
+                }
+            }
+
+            if constexpr (address_type_t::af_type == AF_INET)
+            {
+                sockaddr_in sa_local{};
+                sa_local.sin_family = address_type_t::af_type;
+                sa_local.sin_port = htons(0);
+                sa_local.sin_addr.s_addr = htonl(INADDR_ANY);
+
+                if (const auto status = bind(remote_socket, reinterpret_cast<sockaddr*>(&sa_local), sizeof(sa_local));
+                    status == SOCKET_ERROR)
+                {
+                    closesocket(remote_socket);
+                    closesocket(socks5_tcp_socket);
+                    NETLIB_DEBUG(
+                        "connect_to_remote_host: Failed to bind UDP socket: {}",
+                        WSAGetLastError());
+                    lock.lock();
+                    return false;
+                }
+            }
+            else
+            {
+                // Dual-stack the AF_INET6 UDP relay socket so it can reach an IPv4
+                // SOCKS5 server's UDP relay endpoint via its IPv4-mapped address
+                // (the relay address mirrors the configured control address).
+                DWORD v6_only = 0;
+                if (setsockopt(remote_socket, IPPROTO_IPV6, IPV6_V6ONLY,
+                    reinterpret_cast<const char*>(&v6_only), sizeof(v6_only)) == SOCKET_ERROR)
+                {
+                    NETLIB_WARNING("connect_to_remote_host: Failed to clear IPV6_V6ONLY on UDP relay socket: {}",
+                        WSAGetLastError());
+                }
+
+                sockaddr_in6 sa_local{};
+                sa_local.sin6_family = address_type_t::af_type;
+                sa_local.sin6_port = htons(0);
+                sa_local.sin6_addr = in6addr_any;
+
+                if (const auto status = bind(remote_socket, reinterpret_cast<sockaddr*>(&sa_local), sizeof(sa_local));
+                    status == SOCKET_ERROR)
+                {
+                    closesocket(remote_socket);
+                    closesocket(socks5_tcp_socket);
+                    NETLIB_DEBUG(
+                        "connect_to_remote_host: Failed to bind UDP socket: {}",
+                        WSAGetLastError());
+                    lock.lock();
+                    return false;
+                }
+            }
+
+            // connect to server
+            if constexpr (address_type_t::af_type == AF_INET)
+            {
+                sockaddr_in sa_service{};
+                sa_service.sin_family = address_type_t::af_type;
+                sa_service.sin_addr = udp_endpoint->ip;
+                sa_service.sin_port = htons(udp_endpoint->port);
+
+                if (connect(remote_socket, reinterpret_cast<SOCKADDR*>(&sa_service), sizeof(sa_service)) ==
+                    SOCKET_ERROR)
+                {
+                    closesocket(remote_socket);
+                    closesocket(socks5_tcp_socket);
+                    NETLIB_DEBUG(
+                        "connect_to_remote_host: Failed to connect UDP socket: {}",
+                        WSAGetLastError());
+                    lock.lock();
+                    return false;
+                }
+            }
+            else
+            {
+                sockaddr_in6 sa_service{};
+                sa_service.sin6_family = address_type_t::af_type;
+                sa_service.sin6_addr = udp_endpoint->ip;
+                sa_service.sin6_port = htons(udp_endpoint->port);
+
+                if (connect(remote_socket, reinterpret_cast<SOCKADDR*>(&sa_service), sizeof(sa_service)) ==
+                    SOCKET_ERROR)
+                {
+                    closesocket(remote_socket);
+                    closesocket(socks5_tcp_socket);
+                    NETLIB_DEBUG(
+                        "connect_to_remote_host: Failed to connect UDP socket: {}",
+                        WSAGetLastError());
+                    lock.lock();
+                    return false;
+                }
+            }
+
+            // Re-acquire lock_ to publish the session (see the lock.unlock() above). From here on
+            // proxy_sockets_ and the server members are accessed under the lock again.
+            lock.lock();
+
+            // stop() may have set end_server_ during the unlocked window. It joins association
+            // workers before tearing down sessions, so the server object is still alive, but a NEW
+            // session must not be published during shutdown.
+            if (end_server_.load(std::memory_order_acquire))
+            {
+                closesocket(remote_socket);
+                closesocket(socks5_tcp_socket);
+                return false;
+            }
+
+            // A source port is scheduled to one association worker, but guard defensively: if an
+            // entry appeared meanwhile, drop what we built and use it.
+            if (auto existing = proxy_sockets_.find(local_peer_port); existing != proxy_sockets_.end())
+            {
+                closesocket(remote_socket);
+                closesocket(socks5_tcp_socket);
+                proxy_socket = existing->second;
+                commit_remote_peer(local_peer_address, local_peer_port);
+                return true;
+            }
+
+            auto [it, result] = proxy_sockets_.emplace(local_peer_port,
+                std::make_shared<T>(
+                    socks5_tcp_socket, packet_pool_, server_socket_,
+                    local_peer_sa, remote_socket, udp_endpoint->ip,
+                    udp_endpoint->port, std::move(negotiate_ctx),
+                    logger::log_level_, logger::log_stream_));
+
+            if (result)
+            {
+                try
+                {
+                    // Initialize I/O contexts with shared_ptr
+                    it->second->initialize_io_contexts();
+
+                    if (!it->second->associate_to_completion_port(completion_key_, completion_port_))
+                        throw std::runtime_error("failed to associate UDP relay sockets with IOCP");
+
+                    if (!it->second->start())
+                        throw std::runtime_error("failed to start UDP data relay");
+
+                    proxy_socket = it->second;
+                }
+                catch (const std::exception& e)
+                {
+                    NETLIB_DEBUG(
+                        "connect_to_remote_host: Failed to initialize proxy socket for: {}:{} ({})",
+                        udp_endpoint->ip,
+                        udp_endpoint->port,
+                        e.what());
+                    // initialize_io_contexts() may already have installed the recv self-
+                    // reference; erasing the map entry alone would not run the destructor.
+                    // Cancel I/O, break the self-reference (only once I/O has drained), and
+                    // remove the entry. See cleanup_failed_proxy_socket().
+                    cleanup_failed_proxy_socket(it);
+                    return false;
+                }
+                catch (...)
+                {
+                    NETLIB_DEBUG(
+                        "connect_to_remote_host: Failed to initialize proxy socket for: {}:{} (unknown exception)",
+                        udp_endpoint->ip,
+                        udp_endpoint->port);
+                    cleanup_failed_proxy_socket(it);
+                    return false;
+                }
+            }
+            else
+            {
+                closesocket(remote_socket);
+                closesocket(socks5_tcp_socket);
+                NETLIB_DEBUG(
+                    "connect_to_remote_host: Failed to create proxy socket for: {}:{}",
+                    udp_endpoint->ip,
+                    udp_endpoint->port);
+                return false;
+            }
+
+            commit_remote_peer(local_peer_address, local_peer_port);
+
+            return result;
+        }
+
+        /**
+         * @brief Rolls back a partially-constructed proxy socket on the setup-exception path.
+         *
+         * When connect_to_remote_host() throws after inserting the socket into proxy_sockets_,
+         * initialize_io_contexts() may already have installed the recv io_context's self-
+         * reference (a strong shared_ptr back to the socket -- see
+         * socks5_udp_proxy_socket::initialize_io_contexts()). Erasing the map entry drops only
+         * the map's strong reference; the self-reference would keep the object alive with its
+         * destructor -- and thus its CancelIoEx + closesocket -- never running, leaking the
+         * remote/SOCKS socket handles and any armed WSARecv.
+         *
+         * Cancel I/O and close the sockets first (close_client(), idempotent). Then break the
+         * self-reference and remove the entry immediately ONLY if no overlapped I/O could still
+         * be in flight (outstanding_io() == 0) -- e.g. an exception before start_data_relay()
+         * posted its recv. If start_data_relay() had already posted a WSARecv, close_client()'s
+         * CancelIoEx queues its aborted completion but does not deliver it synchronously, so
+         * outstanding_io() is still nonzero here: leave the socket in the map and let
+         * is_ready_for_removal() drain it and release the self-reference once the count reaches
+         * 0. Releasing the self-reference inline while that completion is outstanding would risk
+         * a use-after-free when the IOCP handler finally dereferences its proxy_socket_ptr. This
+         * mirrors the drain gate in socks5_udp_proxy_socket::is_ready_for_removal(). Runs under
+         * the caller's lock_ (connect_to_remote_host is called by an association worker while
+         * holding it), which serializes this against completions and clear_thread.
+         *
+         * @param it Valid iterator into proxy_sockets_ for the failed session.
+         */
+        void cleanup_failed_proxy_socket(const decltype(proxy_sockets_)::iterator it)
+        {
+            if (it->second)
+            {
+                // Idempotent: cancels any armed WSARecv and closes remote_socket_/socks_socket_.
+                it->second->close_client();
+
+                // A still-pending recv's aborted completion has not been delivered yet, so its
+                // outstanding_io() count is nonzero. Keep the socket in the map so the normal
+                // drain path (is_ready_for_removal()) releases the self-reference after the
+                // completion arrives; releasing it here would be a use-after-free.
+                if (it->second->outstanding_io() != 0)
+                    return;
+
+                // No overlapped I/O in flight: safe to break the self-reference cycle so the
+                // destructor can run once the map entry is erased below.
+                it->second->release_self_reference();
+            }
+
+            proxy_sockets_.erase(it);
+        }
+
+        /**
+         * @brief Periodically cleans up inactive or closed proxy socket sessions.
+         *
+         * This thread routine runs in the background while the server is active. It acquires a lock
+         * on the proxy_sockets_ map, iterates through all active proxy socket sessions, and removes
+         * any that are ready for removal (e.g., due to client disconnect or error). The cleanup
+         * operation is performed once per second to minimize resource usage and ensure timely
+         * release of unused sockets.
+         *
+         * The thread exits automatically when the server is stopped (end_server_ is set to true).
+         */
+        void clear_thread()
+        {
+            while (end_server_ == false)
+            {
+                bool receive_retry_failed = false;
+                if (server_receive_rearm_needed_.exchange(false, std::memory_order_acq_rel) &&
+                    end_server_.load(std::memory_order_acquire) == false &&
+                    !post_server_receive())
+                {
+                    server_receive_rearm_needed_.store(true, std::memory_order_release);
+                    receive_retry_failed = true;
+                    NETLIB_WARNING("Maintenance retry failed to re-arm the local UDP receive");
+                }
+
+                {
+                    std::unique_lock lock(lock_);
+
+                    for (auto it = proxy_sockets_.begin(); it != proxy_sockets_.end();)
+                    {
+                        if (it->second->is_ready_for_removal())
+                        {
+                            proxy_sockets_.erase(it++);
+                        }
+                        else
+                        {
+                            ++it;
+                        }
+                    }
+
+                    using namespace std::chrono_literals;
+                    if (receive_retry_failed)
+                    {
+                        // Keep a persistent socket error from turning the maintenance
+                        // thread into a tight retry/log loop.
+                        maintenance_cv_.wait_for(lock, 1000ms, [this]
+                        {
+                            return end_server_.load(std::memory_order_acquire);
+                        });
+                    }
+                    else
+                    {
+                        maintenance_cv_.wait_for(lock, 1000ms, [this]
+                        {
+                            return end_server_.load(std::memory_order_acquire) ||
+                                server_receive_rearm_needed_.load(std::memory_order_acquire);
+                        });
+                    }
+                }
+            }
+        }
+    };
+}

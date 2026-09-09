@@ -4543,6 +4543,26 @@ https://matsuridayo.github.io/n-configuration/#vpn-tun</translation>
         <source>Click To Sort By Outbound</source>
         <translation>点击“按出站排序”</translation>
     </message>
+    <message>
+        <source>Packet Filter</source>
+        <translation type="unfinished" />
+    </message>
+    <message>
+        <source>Enable Packet Filter</source>
+        <translation type="unfinished" />
+    </message>
+    <message>
+        <source>Packet Filter could not be started: %1</source>
+        <translation type="unfinished" />
+    </message>
+    <message>
+        <source>Packet Filter was not enabled because the system proxy could not be cleared.</source>
+        <translation type="unfinished" />
+    </message>
+    <message>
+        <source>Packet Filter stopped unexpectedly; stopping profile</source>
+        <translation type="unfinished" />
+    </message>
 </context>
 <context>
     <name>MyTableModel</name>

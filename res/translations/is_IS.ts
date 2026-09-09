@@ -4382,6 +4382,26 @@ Ertu viss?</translation>
         <source>Failed to stop, please restart the program.</source>
         <translation type="unfinished">Ekki tókst að stöðva, vinsamlegast endurræstu forritið.</translation>
     </message>
+    <message>
+        <source>Packet Filter</source>
+        <translation type="unfinished" />
+    </message>
+    <message>
+        <source>Enable Packet Filter</source>
+        <translation type="unfinished" />
+    </message>
+    <message>
+        <source>Packet Filter could not be started: %1</source>
+        <translation type="unfinished" />
+    </message>
+    <message>
+        <source>Packet Filter was not enabled because the system proxy could not be cleared.</source>
+        <translation type="unfinished" />
+    </message>
+    <message>
+        <source>Packet Filter stopped unexpectedly; stopping profile</source>
+        <translation type="unfinished" />
+    </message>
 </context>
 <context>
     <name>MyTableModel</name>

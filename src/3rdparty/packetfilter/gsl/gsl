@@ -1,0 +1,27 @@
+#pragma once
+
+#include <cstddef>
+#include <span>
+#include <utility>
+
+namespace gsl {
+
+template <class Container>
+constexpr decltype(auto) at(Container &container, std::size_t index) {
+  return container[index];
+}
+
+template <class Container>
+constexpr decltype(auto) at(const Container &container, std::size_t index) {
+  return container[index];
+}
+
+template <class T, std::size_t Extent = std::dynamic_extent>
+using span = std::span<T, Extent>;
+
+template <class T, class U>
+constexpr T narrow_cast(U &&value) noexcept {
+  return static_cast<T>(std::forward<U>(value));
+}
+
+} // namespace gsl

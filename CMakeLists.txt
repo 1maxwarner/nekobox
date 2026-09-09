@@ -381,18 +381,35 @@ set(EXECUTABLE_NAME "nekobox" CACHE STRING "Executable name")
 set_target_properties(nekobox PROPERTIES OUTPUT_NAME "${EXECUTABLE_NAME}")
 
 if(WIN32)
+    target_sources(nekobox PRIVATE
+        "${CMAKE_SOURCE_DIR}/src/3rdparty/packetfilter/ndisapi/ndisapi.cpp")
+    target_include_directories(nekobox PRIVATE
+        "${CMAKE_SOURCE_DIR}/src/3rdparty/packetfilter"
+        "${CMAKE_SOURCE_DIR}/src/3rdparty/packetfilter/include"
+        "${CMAKE_SOURCE_DIR}/src/3rdparty/packetfilter/netlib/src"
+        "${CMAKE_SOURCE_DIR}/src/3rdparty/packetfilter/socksify")
+    # ndisapi.cpp is compiled into nekobox.exe instead of imported from a DLL.
+    target_compile_definitions(nekobox PRIVATE _LIB)
+
     set(PACKET_FILTER_RUNTIME_DIR "$ENV{PACKET_FILTER_RUNTIME_DIR}" CACHE PATH
-        "Directory containing the ProxiFyre Windows Packet Filter runtime")
+        "Directory containing the signed Windows Packet Filter driver MSI")
     if(PACKET_FILTER_RUNTIME_DIR)
-        if(NOT EXISTS "${PACKET_FILTER_RUNTIME_DIR}/ProxiFyre.exe" OR
-           NOT EXISTS "${PACKET_FILTER_RUNTIME_DIR}/socksify.dll")
+        file(GLOB PACKET_FILTER_MSI_FILES
+            "${PACKET_FILTER_RUNTIME_DIR}/*.msi")
+        if(NOT PACKET_FILTER_MSI_FILES)
             message(FATAL_ERROR
-                "PACKET_FILTER_RUNTIME_DIR must contain ProxiFyre.exe and socksify.dll")
+                "PACKET_FILTER_RUNTIME_DIR must contain the signed Packet Filter MSI")
         endif()
         add_custom_command(TARGET nekobox POST_BUILD
             COMMAND ${CMAKE_COMMAND} -E copy_directory
                 "${PACKET_FILTER_RUNTIME_DIR}"
                 "$<TARGET_FILE_DIR:nekobox>/packetfilter"
+            COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                "${CMAKE_SOURCE_DIR}/script/rename_packet_filter.ps1"
+                "$<TARGET_FILE_DIR:nekobox>/packetfilter/rename_packet_filter.ps1"
+            COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                "${CMAKE_SOURCE_DIR}/script/install_packet_filter.ps1"
+                "$<TARGET_FILE_DIR:nekobox>/packetfilter/install_packet_filter.ps1"
             COMMENT "Copying Windows Packet Filter runtime")
     endif()
 endif()

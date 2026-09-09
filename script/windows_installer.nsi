@@ -16,7 +16,7 @@
     OutFile "nekobox_setup.exe"
 !endif
 InstallDir $WINDIR\qr243vbi\non_exists_directory
-RequestExecutionLevel user
+RequestExecutionLevel admin
 
 !ifdef SOFTWARE_VERSION
 !else
@@ -619,6 +619,7 @@ Var RandomGUID
 Var PID
 Var PPID
 Var PPPID
+Var ExistingInstallDir
 
 !ifndef PSEXEC_INCLUDED
 !define PSEXEC_INCLUDED
@@ -782,6 +783,22 @@ Function .onInit
 	${Else}
 		StrCpy $isAdmin "1"
 	${EndIf}
+
+    ; Reuse the path recorded by a previous NekoBox installation during upgrades.
+    ReadRegStr $ExistingInstallDir HKCU "Software\nekobox" "InstallPath"
+    ${If} "$ExistingInstallDir" == ""
+        ReadRegStr $ExistingInstallDir HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\nekobox" "InstallLocation"
+    ${EndIf}
+    ${If} "$ExistingInstallDir" == ""
+        ReadRegStr $ExistingInstallDir HKLM "Software\nekobox" "InstallPath"
+    ${EndIf}
+    ${If} "$ExistingInstallDir" == ""
+        ReadRegStr $ExistingInstallDir HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\nekobox" "InstallLocation"
+    ${EndIf}
+    ${If} "$ExistingInstallDir" != ""
+        IfFileExists "$ExistingInstallDir\${EXECUTABLE_NAME}.exe" 0 +2
+        StrCpy $INSTDIR "$ExistingInstallDir"
+    ${EndIf}
 	${If} "$INSTDIR" != "$WINDIR\qr243vbi\non_exists_directory"
 		
 	${Else}
@@ -868,6 +885,47 @@ FunctionEnd
 !define WriteToFile `!insertmacro WriteToFile false`
 !define WriteLineToFile `!insertmacro WriteToFile true`
 
+Function InstallNetworkFilter
+    FindFirst $1 $2 "$INSTDIR\packetfilter\Windows.Packet.Filter*.msi"
+    ${If} "$2" == ""
+        DetailPrint "Nekobox Network Filter MSI was not included in this package"
+        FindClose $1
+        Return
+    ${EndIf}
+
+    DetailPrint "Installing or repairing Nekobox Network Filter adapter..."
+    nsExec::ExecToLog 'powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$INSTDIR\install_packet_filter.ps1" -MsiPath "$INSTDIR\packetfilter\$2" -RenameScript "$INSTDIR\rename_packet_filter.ps1" -Reinstall'
+    Pop $3
+    ${If} $3 == 0
+        WriteRegStr HKLM "Software\NekoBox" "NetworkFilterInstalled" "1"
+        WriteRegStr HKLM "SYSTEM\CurrentControlSet\Services\ndisrd" "DisplayName" "Nekobox Network Filter"
+        WriteRegStr HKLM "SYSTEM\CurrentControlSet\Services\ndisrd" "Description" "Nekobox Network Filter"
+    ${Else}
+        DetailPrint "Nekobox Network Filter installation returned $3; see packetfilter-install.log"
+    ${EndIf}
+    FindClose $1
+FunctionEnd
+
+Function un.RemoveNetworkFilter
+    ReadRegStr $3 HKLM "Software\NekoBox" "NetworkFilterInstalled"
+    nsExec::ExecToLog 'netcfg.exe -q nt_ndisrd'
+    Pop $4
+    ${If} "$3" == "1"
+    ${OrIf} $4 == 0
+    FindFirst $0 $1 "$INSTDIR\packetfilter\Windows.Packet.Filter*.msi"
+    ${If} "$1" != ""
+        DetailPrint "Removing Nekobox Network Filter adapter..."
+        nsExec::ExecToLog 'msiexec.exe /x "$INSTDIR\packetfilter\$1" /passive /norestart'
+        Pop $2
+    ${EndIf}
+    FindClose $0
+    nsExec::ExecToLog 'netcfg.exe -v -u nt_ndisrd'
+    Pop $2
+    DeleteRegKey HKLM "Software\NekoBox"
+    DeleteRegKey HKLM "SYSTEM\CurrentControlSet\Control\Network\{4D36E974-E325-11CE-BFC1-08002BE10318}\{CD75C963-E19F-4139-BC3B-14019EF72F19}"
+    ${EndIf}
+FunctionEnd
+
 Section "Install"
 
   !insertmacro "checkVcRedist"
@@ -929,6 +987,10 @@ Section "Install"
   !endif
   ${EndIf}
 
+  File ".\script\rename_packet_filter.ps1"
+  File ".\script\install_packet_filter.ps1"
+  Call InstallNetworkFilter
+
   ${If} "$Winget" == "1"
     WriteINIStr "$INSTDIR\global.ini" "General" "winget_package" "true"
   ${Else}
@@ -965,11 +1027,29 @@ SectionEnd
 
 Section "Uninstall"
 
+  IfFileExists "$INSTDIR\nekobox_core.exe" 0 +2
+    nsExec::ExecToLog '"$INSTDIR\nekobox_core.exe" -installer-mode -kill-processes "$INSTDIR"'
+  nsExec::ExecToLog 'taskkill.exe /F /T /IM nekobox.exe'
+  nsExec::ExecToLog 'taskkill.exe /F /T /IM nekobox_core.exe'
+  Call un.RemoveNetworkFilter
+
   Delete "$SMPROGRAMS\${SOFTWARE_NAME}.lnk"
   Delete "$desktop\${SOFTWARE_NAME}.lnk"
   RMDir "$SMPROGRAMS\${SOFTWARE_NAME}"
 
   RMDir /r "$INSTDIR"
+
+  ; Remove NekoBox-owned per-user runtime/config locations as well.
+  ${If} "$APPDATA\NekoBox" != "$INSTDIR"
+  RMDir /r "$APPDATA\NekoBox"
+  ${EndIf}
+  ${If} "$LOCALAPPDATA\NekoBox" != "$INSTDIR"
+    RMDir /r "$LOCALAPPDATA\NekoBox"
+  ${EndIf}
+  RMDir /r "$LOCALAPPDATA\NekoBox\packetfilter"
+  ${If} "$PROGRAMDATA\NekoBox" != "$INSTDIR"
+    RMDir /r "$PROGRAMDATA\NekoBox"
+  ${EndIf}
 
   Delete "$INSTDIR\uninstall.exe"
 

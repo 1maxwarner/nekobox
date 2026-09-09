@@ -4394,6 +4394,26 @@ Are you sure?</source>
         <source>Failed to stop, please restart the program.</source>
         <translation type="unfinished">ବନ୍ଦ କରିବାରେ ବିଫଳ, ଦୟାକରି ପ୍ରୋଗ୍ରାମକୁ ପୁନ rest ଆରମ୍ଭ କରନ୍ତୁ |</translation>
     </message>
+    <message>
+        <source>Packet Filter</source>
+        <translation type="unfinished" />
+    </message>
+    <message>
+        <source>Enable Packet Filter</source>
+        <translation type="unfinished" />
+    </message>
+    <message>
+        <source>Packet Filter could not be started: %1</source>
+        <translation type="unfinished" />
+    </message>
+    <message>
+        <source>Packet Filter was not enabled because the system proxy could not be cleared.</source>
+        <translation type="unfinished" />
+    </message>
+    <message>
+        <source>Packet Filter stopped unexpectedly; stopping profile</source>
+        <translation type="unfinished" />
+    </message>
 </context>
 <context>
     <name>MyTableModel</name>

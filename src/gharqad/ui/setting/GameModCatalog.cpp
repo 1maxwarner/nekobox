@@ -61,8 +61,14 @@ QString CaseInsensitiveProcessPathPattern(const QString &processName) {
     // the same discovered process path, but supports RE2's inline (?i) flag.
     // Match the executable basename so a Windows path using either slash is
     // accepted, regardless of the casing reported by the operating system.
+    QString normalized = processName;
+    const auto suffix = QStringLiteral(".exe");
+    const bool windowsSuffix = normalized.endsWith(suffix, Qt::CaseInsensitive);
+    if (windowsSuffix)
+        normalized.chop(suffix.size());
+
     QString pattern = QStringLiteral("(?i)(?:^|.*[\\\\/])");
-    for (const auto character : processName) {
+    for (const auto character : normalized) {
         if (character == QLatin1Char('*')) {
             pattern += QStringLiteral(".*");
         } else if (character == QLatin1Char('?')) {
@@ -71,6 +77,14 @@ QString CaseInsensitiveProcessPathPattern(const QString &processName) {
             pattern += QRegularExpression::escape(QString(character));
         }
     }
+    // The catalog lists Windows executables, but sing-box reports the real
+    // image path on every platform. Match the optional ".exe" suffix so the
+    // same rule catches both the Windows binary (C:\...\telegram.exe) and the
+    // extensionless Linux/macOS binary (/usr/bin/telegram). The regex string
+    // must contain a single backslash before the dot ("\.") so RE2 treats it
+    // as a literal period; a doubled backslash would demand a real backslash
+    // in the path and never match a genuine ".exe" ending.
+    pattern += QStringLiteral("(?:\\.exe)?");
     return pattern + QLatin1Char('$');
 }
 
@@ -194,6 +208,48 @@ QJsonArray BuildRules(const QStringList &enabledServiceIds,
                     rule.insert(QStringLiteral("outbound"), outbound);
             }
             result.append(rule);
+        }
+    }
+    return result;
+}
+
+QStringList ProcessNamesForOutbound(const QStringList &enabledServiceIds,
+                                    const QString &outbound, QString *error) {
+    if (enabledServiceIds.isEmpty())
+        return {};
+
+    const QSet<QString> enabled(enabledServiceIds.cbegin(),
+                                enabledServiceIds.cend());
+    const auto root = LoadCatalog(error);
+    QStringList result;
+    QSet<QString> seen;
+    for (const auto &value : root.value(QStringLiteral("services")).toArray()) {
+        const auto service = value.toObject();
+        const auto serviceId = service.value(QStringLiteral("id")).toString();
+        const auto legacyIds =
+            StringArray(service.value(QStringLiteral("legacy_ids")).toArray());
+        bool matched = enabled.contains(serviceId);
+        for (auto it = legacyIds.cbegin(); !matched && it != legacyIds.cend();
+             ++it)
+            matched = enabled.contains(*it);
+        if (!matched)
+            continue;
+        for (const auto &ruleValue :
+             service.value(QStringLiteral("rules")).toArray()) {
+            const auto rule = ruleValue.toObject();
+            if (rule.value(QStringLiteral("outbound")).toString() != outbound)
+                continue;
+            for (const auto &name :
+                 rule.value(QStringLiteral("process_name")).toArray()) {
+                const auto processName = name.toString().trimmed();
+                // The native packet filter matches process names case-insensitively,
+                // so the executable basename works regardless of install directory.
+                if (!processName.isEmpty() &&
+                    !seen.contains(processName.toCaseFolded())) {
+                    seen.insert(processName.toCaseFolded());
+                    result.append(processName);
+                }
+            }
         }
     }
     return result;
