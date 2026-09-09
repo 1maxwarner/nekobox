@@ -746,12 +746,62 @@ void MainWindow::profile_start(int _id, bool do_not_test) {
             if (Configs::dataStore->routing->tun_split != nullptr) {
                 for (const auto &processPath :
                      Configs::dataStore->routing->tun_split->proxy)
-                    addUnique(includedProcesses,
-                              QFileInfo(processPath).fileName());
+                    // Keep a configured full path intact. The native matcher
+                    // supports both exact process names and path substrings;
+                    // reducing paths to a basename can route an unrelated
+                    // executable with the same filename.
+                    addUnique(includedProcesses, processPath);
                 for (const auto &processPath :
                      Configs::dataStore->routing->tun_split->direct)
-                    addUnique(excludedProcesses,
-                              QFileInfo(processPath).fileName());
+                    addUnique(excludedProcesses, processPath);
+            }
+
+            // In Packet Filter mode sing-box receives the redirected socket
+            // from nekobox.exe, so its own process selectors cannot identify
+            // the original application. Mirror process selectors from the
+            // active routing profile into the native filter. A process rule
+            // targeting proxy (or another real outbound) must be intercepted;
+            // Direct rules are excluded so they stay on the physical adapter.
+            const auto appendRuleProcesses = [&](const auto &rule,
+                                                  QStringList &target) {
+                for (const auto &name : rule->process_name)
+                    addUnique(target, name);
+                for (const auto &path : rule->process_path)
+                    addUnique(target, path);
+                // process_path_regex has no equivalent in the native filter;
+                // keep it in sing-box for TUN mode instead of broad matching.
+            };
+            auto routeChain = Configs::profileManager->GetRouteChain(
+                Configs::dataStore->routing->current_route_id);
+            if (routeChain == nullptr) {
+                const auto enabledRoutes =
+                    Configs::profileManager->GetEnabledRouteChains();
+                if (!enabledRoutes.isEmpty())
+                    routeChain = enabledRoutes.first();
+            }
+            if (routeChain != nullptr) {
+                for (const auto &rule : routeChain->Rules) {
+                    if (rule == nullptr ||
+                        (rule->process_name.isEmpty() &&
+                         rule->process_path.isEmpty()))
+                        continue;
+
+                    const bool isDirect =
+                        rule->action == "route" &&
+                        rule->outboundID == Configs::directID;
+                    const bool isBlock =
+                        rule->action == "reject" ||
+                        (rule->action == "route" &&
+                         rule->outboundID == Configs::blockID);
+                    if (isDirect || isBlock) {
+                        // The native backend has no process-level reject
+                        // operation. Keeping a Block selector direct avoids
+                        // unexpectedly forcing it through the proxy.
+                        appendRuleProcesses(rule, excludedProcesses);
+                    } else {
+                        appendRuleProcesses(rule, includedProcesses);
+                    }
+                }
             }
 
             QString filterError;
