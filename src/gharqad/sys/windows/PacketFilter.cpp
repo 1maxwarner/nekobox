@@ -14,7 +14,9 @@
 #include <windows.h>
 #include <shellapi.h>
 
-#include "../../../../3rdparty/packetfilter/netlib/src/proxy/socks_local_router.h"
+// The vendor umbrella header establishes the WinSock/NDISAPI/netlib include
+// order required by socks_local_router.h.
+#include "../../../../3rdparty/packetfilter/socksify/unmanaged.h"
 
 #include <optional>
 #include <string>
