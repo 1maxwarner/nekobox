@@ -89,6 +89,8 @@ namespace Configs {
 
     QString get_jsdelivr_link(QString link);
 
-    QJsonObject BuildTunInbound(const QStringList &directIPSets, const QStringList &directIPCIDRs);
+    QJsonObject BuildTunInbound(const QStringList &directIPSets,
+                                const QStringList &directIPCIDRs,
+                                bool routePrivateThroughTun = false);
 
 } // namespace Configs
