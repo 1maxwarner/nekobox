@@ -927,16 +927,12 @@ namespace netlib::log {
                     const auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(
                         now.time_since_epoch()) % 1000;
 
-                    try {
-                        // Cache the time zone pointer for performance (pointer is stable)
-                        static const std::chrono::time_zone* zone = std::chrono::current_zone();
-                        std::chrono::zoned_time zt{ zone, tp_s };
-                        out << std::format("{:%Y-%m-%dT%H:%M:%S}.{:03}", zt, static_cast<int>(ms.count()));
-                    }
-                    catch (...) {
-                        // Fallback: UTC with 'Z' suffix to clearly indicate time zone
-                        out << std::format("{:%Y-%m-%dT%H:%M:%S}.{:03}Z", tp_s, static_cast<int>(ms.count()));
-                    }
+                    // MSVC's C++20 library does not provide chrono timezone
+                    // support on all supported toolsets. Emit the system clock
+                    // timestamp directly; the suffix makes the lack of a
+                    // timezone conversion explicit and keeps logging portable.
+                    out << std::format("{:%Y-%m-%dT%H:%M:%S}.{:03}Z", tp_s,
+                                       static_cast<int>(ms.count()));
                 }
 
                 // Conditionally include thread ID

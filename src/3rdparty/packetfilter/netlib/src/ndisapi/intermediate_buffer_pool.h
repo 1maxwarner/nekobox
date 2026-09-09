@@ -1,7 +1,7 @@
 #pragma once
 
-#include <boost/pool/object_pool.hpp>
 #include <mutex>
+#include <new>
 
 namespace netlib::ndisapi
 {
@@ -53,8 +53,7 @@ namespace netlib::ndisapi
             /// </summary>
             /// <param name="ptr">Pointer to the intermediate_buffer object to be deleted.</param>
             void operator()(intermediate_buffer* ptr) const {
-                std::scoped_lock lock(instance().mutex_);
-                instance().pool_.destroy(ptr);
+                delete ptr;
             }
         };
 
@@ -66,10 +65,10 @@ namespace netlib::ndisapi
         /// <returns>A unique_ptr to the allocated intermediate_buffer object, or nullptr if allocation fails.</returns>
         intermediate_buffer_ptr allocate() {
             std::scoped_lock lock(mutex_);
-            intermediate_buffer* raw_ptr;
+            intermediate_buffer* raw_ptr = nullptr;
 
             try {
-                raw_ptr = pool_.construct(); // This might throw
+                raw_ptr = new (std::nothrow) intermediate_buffer();
                 if (raw_ptr == nullptr)
                     return nullptr;
                 std::fill_n(reinterpret_cast<char*>(raw_ptr), offsetof(_INTERMEDIATE_BUFFER, m_IBuffer), 0);
@@ -100,11 +99,8 @@ namespace netlib::ndisapi
         /// Private constructor for singleton.
         /// </summary>
         /// <param name="initial_size">The initial size of the pool.</param>
-        explicit intermediate_buffer_pool(const size_t initial_size = 32)
-            : pool_(initial_size) {
-        }
+        intermediate_buffer_pool() = default;
 
         std::mutex mutex_; ///< Mutex to protect the pool.
-        boost::object_pool<intermediate_buffer> pool_; ///< The pool of intermediate_buffer objects.
     };
 }
