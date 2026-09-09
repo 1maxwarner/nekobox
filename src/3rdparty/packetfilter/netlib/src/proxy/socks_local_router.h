@@ -2,6 +2,11 @@
 
 #include "process_routing_policy.h"
 
+#include <cstdint>
+#include <functional>
+#include <string>
+#include <utility>
+
 namespace proxy
 {
     /**
@@ -53,6 +58,17 @@ namespace proxy
         using s5_udp_proxy_server_v6 = socks5_local_udp_proxy_server<socks5_udp_proxy_socket<net::ip_address_v6>>;
 
     public:
+        struct attribution_event
+        {
+            std::string network;
+            std::string destination;
+            std::wstring process_name;
+            std::wstring process_path;
+            uint16_t source_port{};
+        };
+
+        using attribution_callback = std::function<void(const attribution_event&)>;
+
         enum supported_protocols : uint8_t
         {
             tcp,
@@ -370,6 +386,32 @@ namespace proxy
          */
         bool bypass_unresolved_processes_{ false };
 
+        mutable std::mutex attribution_callback_mutex_;
+        attribution_callback attribution_callback_;
+
+        void notify_attribution(const std::string& network,
+                                const std::string& destination,
+                                const std::shared_ptr<iphelper::network_process>& process,
+                                const uint16_t source_port)
+        {
+            if (!process)
+                return;
+
+            attribution_event event{
+                network,
+                destination,
+                process->name,
+                process->path_name,
+                source_port};
+            attribution_callback callback;
+            {
+                std::scoped_lock lock(attribution_callback_mutex_);
+                callback = attribution_callback_;
+            }
+            if (callback)
+                callback(event);
+        }
+
         /**
         * @brief Atomic boolean to track the active status of the router.
         */
@@ -625,6 +667,13 @@ namespace proxy
 
             // Add the ICMP filter to the static filters list
             static_filters_.add_filter_back(icmp_filter);
+        }
+
+        /** Registers a callback that receives the original process for each redirected flow. */
+        void set_attribution_callback(attribution_callback callback)
+        {
+            std::scoped_lock lock(attribution_callback_mutex_);
+            attribution_callback_ = std::move(callback);
         }
 
         /**
@@ -2168,6 +2217,9 @@ namespace proxy
                         NETLIB_LOG(log_level::debug,
                             "Redirecting UDP {} : {} -> {} : {}",
                             source_address, source_port, destination_address, destination_port);
+                        notify_attribution("udp",
+                            std::string{destination_address} + ":" + std::to_string(destination_port),
+                            process, source_port);
                     }
 
                     log_packet_to_pcap(buffer);
@@ -2259,7 +2311,8 @@ namespace proxy
             if (proxy_lookup.action == proxy_port_action::proxy)
             {
                 // If this is a SYN packet (connection initiation), map the source port to the destination endpoint
-                if ((tcp_header->th_flags & (TH_SYN | TH_ACK)) == TH_SYN)
+                const bool is_syn = (tcp_header->th_flags & (TH_SYN | TH_ACK)) == TH_SYN;
+                if (is_syn)
                 {
                     std::scoped_lock lock(tcp_mapper_lock_);
                     tcp_mapper_[ntohs(tcp_header->th_sport)] =
@@ -2277,6 +2330,13 @@ namespace proxy
                 // Attempt to process the packet for client-to-server redirection
                 if (tcp_redirect_->process_client_to_server_packet(buffer, htons(proxy_lookup.port)))
                 {
+                    if (is_syn)
+                    {
+                        notify_attribution("tcp",
+                            std::string{net::ip_address_v4(ip_header->ip_dst)} + ":" +
+                                std::to_string(ntohs(tcp_header->th_dport)),
+                            process, ntohs(tcp_header->th_sport));
+                    }
                     log_packet_to_pcap(buffer);
                     return packet_filter::packet_action{ packet_filter::packet_action::action_type::revert };
                 }
@@ -2448,6 +2508,9 @@ namespace proxy
                         NETLIB_LOG(log_level::debug,
                             "Redirecting UDP6 {} : {} -> {} : {}",
                             source_address, source_port, destination_address, destination_port);
+                        notify_attribution("udp",
+                            "[" + destination_address + "]:" + std::to_string(destination_port),
+                            process, source_port);
                     }
 
                     log_packet_to_pcap(buffer);
@@ -2536,7 +2599,8 @@ namespace proxy
             if (proxy_lookup.action == proxy_port_action::proxy)
             {
                 // If this is a SYN packet (connection initiation), map the source port to the destination endpoint
-                if ((tcp_header->th_flags & (TH_SYN | TH_ACK)) == TH_SYN)
+                const bool is_syn = (tcp_header->th_flags & (TH_SYN | TH_ACK)) == TH_SYN;
+                if (is_syn)
                 {
                     std::scoped_lock lock(tcp_mapper_v6_lock_);
                     tcp_mapper_v6_[ntohs(tcp_header->th_sport)] =
@@ -2555,6 +2619,13 @@ namespace proxy
                 // Attempt to process the packet for client-to-server redirection
                 if (tcp_redirect_v6_->process_client_to_server_packet(buffer, htons(proxy_lookup.port)))
                 {
+                    if (is_syn)
+                    {
+                        notify_attribution("tcp",
+                            "[" + std::string{net::ip_address_v6{ip_header->ip6_dst}} + "]:" +
+                                std::to_string(ntohs(tcp_header->th_dport)),
+                            process, ntohs(tcp_header->th_sport));
+                    }
                     log_packet_to_pcap(buffer);
                     return packet_filter::packet_action{ packet_filter::packet_action::action_type::revert };
                 }

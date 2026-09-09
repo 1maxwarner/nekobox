@@ -3,10 +3,62 @@
 
 
 #include <QThread>
+#include <QSet>
 #include <nekobox/api/RPC.h>
 #include <nekobox/ui/mainwindow_interface.h>
 #include <nekobox/stats/connections/connectionLister.hpp>
 #include <nekobox/global/GuiUtils.hpp>
+#ifdef Q_OS_WIN
+#include <nekobox/sys/windows/PacketFilter.hpp>
+#endif
+
+namespace {
+#ifdef Q_OS_WIN
+QString normalizePacketFilterEndpoint(QString endpoint) {
+    endpoint = endpoint.trimmed().toLower();
+    if (endpoint.startsWith(QLatin1Char('['))) {
+        endpoint.remove(0, 1);
+        const auto close = endpoint.indexOf(QLatin1Char(']'));
+        if (close >= 0)
+            endpoint.remove(close, 1);
+    }
+    return endpoint;
+}
+
+void restorePacketFilterProcess(Stats::ConnectionMetadata &connection,
+                                const std::vector<Configs_sys::PacketFilterController::Attribution> &events,
+                                QSet<int> &usedEvents) {
+    const auto processLower = connection.process.toLower();
+    if (!connection.process.isEmpty() && !processLower.contains(QStringLiteral("nekobox"))) {
+        return;
+    }
+
+    int bestIndex = -1;
+    qint64 bestAge = 15001;
+    for (int index = 0; index < static_cast<int>(events.size()); ++index) {
+        if (usedEvents.contains(index))
+            continue;
+        const auto &event = events[static_cast<std::size_t>(index)];
+        if (!event.network.isEmpty() &&
+            event.network.compare(connection.network, Qt::CaseInsensitive) != 0) {
+            continue;
+        }
+        if (normalizePacketFilterEndpoint(event.destination) !=
+            normalizePacketFilterEndpoint(connection.dest))
+            continue;
+        const qint64 age = qAbs(connection.createdAtMs - event.timestampMs);
+        if (age < bestAge) {
+            bestAge = age;
+            bestIndex = index;
+        }
+    }
+    if (bestIndex >= 0 && !events[static_cast<std::size_t>(bestIndex)].process.isEmpty()) {
+        connection.process = events[static_cast<std::size_t>(bestIndex)].process;
+        usedEvents.insert(bestIndex);
+    }
+}
+#endif
+}
 
 namespace Stats
 {
@@ -54,6 +106,10 @@ namespace Stats
         QSet<QString> newState;
         QList<ConnectionMetadata> sorted;
         auto conns = resp->connections;
+#ifdef Q_OS_WIN
+        const auto packetFilterEvents = Configs_sys::PacketFilterController::recentAttributions();
+        QSet<int> usedPacketFilterEvents;
+#endif
         for (auto conn : conns)
         {
             auto c = ConnectionMetadata();
@@ -67,6 +123,9 @@ namespace Stats
             c.outbound = QString::fromUtf8(conn.outbound.c_str());
             c.process = QString::fromUtf8(conn.process.c_str());
             c.protocol = QString::fromUtf8(conn.protocol.c_str());
+#ifdef Q_OS_WIN
+            restorePacketFilterProcess(c, packetFilterEvents, usedPacketFilterEvents);
+#endif
             if (sort == Default)
             {
                 if (state->contains(c.id))

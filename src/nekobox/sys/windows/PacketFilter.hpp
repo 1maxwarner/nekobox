@@ -2,6 +2,7 @@
 
 #include <QString>
 #include <QStringList>
+#include <vector>
 
 #ifdef Q_OS_WIN
 #include <memory>
@@ -19,6 +20,16 @@ namespace Configs_sys {
  */
 class PacketFilterController {
 public:
+    struct Attribution {
+        QString network;
+        QString destination;
+        QString process;
+        QString processPath;
+        QString action;
+        qint64 timestampMs = 0;
+        quint16 sourcePort = 0;
+    };
+
     PacketFilterController();
     ~PacketFilterController();
 
@@ -31,6 +42,8 @@ public:
     void stop();
     bool isRunning() const;
     static bool cleanupInstalledRuntime(QString *error = nullptr);
+    static std::vector<Attribution> recentAttributions();
+    static void clearAttributions();
 
 private:
 #ifdef Q_OS_WIN

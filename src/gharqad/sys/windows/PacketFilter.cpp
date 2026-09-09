@@ -6,6 +6,7 @@
 #include <nekobox/sys/windows/guihelper.h>
 
 #include <QCoreApplication>
+#include <QDateTime>
 #include <QDir>
 #include <QFileInfo>
 #include <QStandardPaths>
@@ -19,6 +20,7 @@
 #include "../../../../3rdparty/packetfilter/socksify/unmanaged.h"
 
 #include <optional>
+#include <deque>
 #include <string>
 
 namespace {
@@ -43,6 +45,32 @@ void setError(QString *error, const QString &message) {
 
 std::wstring processPattern(const QString &value) {
     return value.trimmed().toStdWString();
+}
+
+std::mutex attributionMutex;
+std::deque<Configs_sys::PacketFilterController::Attribution> attributionEvents;
+constexpr qint64 attributionTtlMs = 15000;
+constexpr std::size_t attributionLimit = 256;
+
+void recordAttribution(const proxy::socks_local_router::attribution_event &event) {
+    const auto now = QDateTime::currentMSecsSinceEpoch();
+    Configs_sys::PacketFilterController::Attribution item;
+    item.network = QString::fromStdString(event.network);
+    item.destination = QString::fromStdString(event.destination);
+    item.process = QString::fromStdWString(event.process_name);
+    item.processPath = QString::fromStdWString(event.process_path);
+    item.action = QStringLiteral("proxy");
+    item.timestampMs = now;
+    item.sourcePort = event.source_port;
+
+    std::scoped_lock lock(attributionMutex);
+    while (!attributionEvents.empty() &&
+           now - attributionEvents.front().timestampMs > attributionTtlMs) {
+        attributionEvents.pop_front();
+    }
+    attributionEvents.push_back(std::move(item));
+    while (attributionEvents.size() > attributionLimit)
+        attributionEvents.pop_front();
 }
 
 } // namespace
@@ -73,6 +101,23 @@ bool PacketFilterController::cleanupInstalledRuntime(QString *error) {
         }
     }
     return true;
+}
+
+std::vector<PacketFilterController::Attribution>
+PacketFilterController::recentAttributions() {
+    const auto now = QDateTime::currentMSecsSinceEpoch();
+    std::scoped_lock lock(attributionMutex);
+    while (!attributionEvents.empty() &&
+           now - attributionEvents.front().timestampMs > attributionTtlMs) {
+        attributionEvents.pop_front();
+    }
+    return std::vector<PacketFilterController::Attribution>(
+        attributionEvents.begin(), attributionEvents.end());
+}
+
+void PacketFilterController::clearAttributions() {
+    std::scoped_lock lock(attributionMutex);
+    attributionEvents.clear();
 }
 
 QString PacketFilterController::findDriverInstaller(const QString &directory) const {
@@ -176,10 +221,12 @@ bool PacketFilterController::startNative(
     const QStringList &includedProcesses,
     const QStringList &excludedProcesses, QString *error) {
     try {
+        clearAttributions();
         nativeState = std::make_unique<NativeState>();
         nativeState->router = std::make_unique<proxy::socks_local_router>(
             netlib::log::log_level::error, nullptr, nullptr,
             false /* preserve process attribution for elevated/game mode */);
+        nativeState->router->set_attribution_callback(recordAttribution);
 
         // Keep LAN bypass behavior from the previous Packet Filter mode.
         nativeState->router->set_bypass_lan();
@@ -281,6 +328,7 @@ void PacketFilterController::stopUnlocked() {
     if (nativeState && nativeState->router)
         nativeState->router->stop();
     nativeState.reset();
+    clearAttributions();
     running = false;
 }
 
@@ -297,6 +345,9 @@ bool PacketFilterController::start(int, const QString &, const QString &,
 void PacketFilterController::stop() {}
 bool PacketFilterController::isRunning() const { return false; }
 bool PacketFilterController::cleanupInstalledRuntime(QString *) { return false; }
+std::vector<PacketFilterController::Attribution>
+PacketFilterController::recentAttributions() { return {}; }
+void PacketFilterController::clearAttributions() {}
 } // namespace Configs_sys
 
 #endif
